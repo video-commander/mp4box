@@ -1,5 +1,5 @@
 use crate::boxes::{BoxHeader, BoxKey, FourCC};
-use byteorder::{BigEndian, ReadBytesExt};
+use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
@@ -38,6 +38,8 @@ pub enum StructuredData {
     HandlerReference(HdlrData),
     /// Track Header Box (tkhd)
     TrackHeader(TkhdData),
+    /// Track Fragment Run Box (trun)
+    TrackFragmentRun(TrunData),
 }
 
 /// Sample Description Box data
@@ -171,6 +173,25 @@ pub struct TkhdData {
     pub duration: u64,
     pub width: f32,
     pub height: f32,
+}
+
+/// Track Fragment Run Box data
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TrunData {
+    pub version: u8,
+    pub flags: u32,
+    pub sample_count: u32,
+    pub data_offset: Option<i32>,
+    pub first_sample_flags: Option<u32>,
+    pub samples: Vec<TrunSample>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TrunSample {
+    pub duration: Option<u32>,
+    pub size: Option<u32>,
+    pub flags: Option<u32>,
+    pub composition_time_offset: Option<i32>,
 }
 
 /// Trait for custom box decoders.
@@ -1041,6 +1062,756 @@ impl BoxDecoder for ElstDecoder {
     }
 }
 
+// ---------- Helpers (continued) ----------
+
+fn read_descriptor_length(buf: &[u8], pos: &mut usize) -> Option<u32> {
+    let mut length = 0u32;
+    for _ in 0..4 {
+        if *pos >= buf.len() {
+            return None;
+        }
+        let b = buf[*pos];
+        *pos += 1;
+        length = (length << 7) | (b & 0x7F) as u32;
+        if b & 0x80 == 0 {
+            break;
+        }
+    }
+    Some(length)
+}
+
+// ---------- New decoders ----------
+
+// btrt: buffer size, max bitrate, avg bitrate
+pub struct BtrtDecoder;
+
+impl BoxDecoder for BtrtDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let buffer_size = r.read_u32::<BigEndian>()?;
+        let max_bitrate = r.read_u32::<BigEndian>()?;
+        let avg_bitrate = r.read_u32::<BigEndian>()?;
+        Ok(BoxValue::Text(format!(
+            "buffer_size={} max_bitrate={} avg_bitrate={}",
+            buffer_size, max_bitrate, avg_bitrate
+        )))
+    }
+}
+
+// esds: elementary stream descriptor
+pub struct EsdsDecoder;
+
+impl BoxDecoder for EsdsDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let buf = read_all(r)?;
+        let mut pos = 0;
+
+        // ES_Descriptor tag = 0x03
+        if pos >= buf.len() || buf[pos] != 0x03 {
+            return Ok(BoxValue::Text("esds: no ES_Descriptor".into()));
+        }
+        pos += 1;
+        if read_descriptor_length(&buf, &mut pos).is_none() {
+            return Ok(BoxValue::Text("esds: truncated".into()));
+        }
+        // ES_ID (2) + flags (1)
+        if pos + 3 > buf.len() {
+            return Ok(BoxValue::Text("esds: truncated ES_ID".into()));
+        }
+        pos += 2;
+        let stream_flags = buf[pos];
+        pos += 1;
+        if stream_flags & 0x80 != 0 { pos += 2; } // streamDependenceFlag
+        if stream_flags & 0x40 != 0 {
+            if pos >= buf.len() { return Ok(BoxValue::Text("esds: truncated URL".into())); }
+            let url_len = buf[pos] as usize;
+            pos += 1 + url_len;
+        }
+        if stream_flags & 0x20 != 0 { pos += 2; } // OCRstreamFlag
+
+        // DecoderConfigDescriptor tag = 0x04
+        if pos >= buf.len() || buf[pos] != 0x04 {
+            return Ok(BoxValue::Text("esds: no DecoderConfigDescriptor".into()));
+        }
+        pos += 1;
+        if read_descriptor_length(&buf, &mut pos).is_none() {
+            return Ok(BoxValue::Text("esds: truncated DecoderConfig".into()));
+        }
+        if pos >= buf.len() {
+            return Ok(BoxValue::Text("esds: truncated objectTypeIndication".into()));
+        }
+        let object_type = buf[pos];
+        pos += 1;
+
+        // streamType(1) + bufferSizeDB(3) + maxBitrate(4) + avgBitrate(4)
+        if pos + 8 > buf.len() {
+            return Ok(BoxValue::Text(format!("esds: objectType=0x{:02X}", object_type)));
+        }
+        pos += 4; // skip streamType byte + bufferSizeDB
+        let max_bitrate = u32::from_be_bytes(buf[pos..pos + 4].try_into().unwrap());
+        pos += 4;
+        let avg_bitrate = if pos + 4 <= buf.len() {
+            u32::from_be_bytes(buf[pos..pos + 4].try_into().unwrap())
+        } else {
+            0
+        };
+
+        let type_name = match object_type {
+            0x40 => "AAC",
+            0x66 | 0x67 | 0x68 => "MPEG-4 Audio",
+            0x69 => "MPEG-2 Audio",
+            0x6B => "MP3",
+            0x20 => "MPEG-4 Visual",
+            0x21 => "H.264/AVC",
+            0x60..=0x65 => "MPEG-2 Visual",
+            _ => "unknown",
+        };
+
+        Ok(BoxValue::Text(format!(
+            "objectType=0x{:02X} ({}) max_bitrate={} avg_bitrate={}",
+            object_type, type_name, max_bitrate, avg_bitrate
+        )))
+    }
+}
+
+// av1C: AV1 codec configuration
+pub struct Av1cDecoder;
+
+impl BoxDecoder for Av1cDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let buf = read_all(r)?;
+        if buf.len() < 4 {
+            return Ok(BoxValue::Bytes(buf));
+        }
+        let marker_version = buf[0];
+        let marker = (marker_version >> 7) & 1;
+        let version = marker_version & 0x7F;
+        let seq_profile = (buf[1] >> 5) & 0x07;
+        let seq_level_idx_0 = buf[1] & 0x1F;
+        let seq_tier_0 = (buf[2] >> 7) & 1;
+        let high_bitdepth = (buf[2] >> 6) & 1;
+        let twelve_bit = (buf[2] >> 5) & 1;
+        let monochrome = (buf[2] >> 4) & 1;
+        Ok(BoxValue::Text(format!(
+            "marker={} version={} profile={} level_idx={} tier={} high_bitdepth={} twelve_bit={} monochrome={}",
+            marker, version, seq_profile, seq_level_idx_0, seq_tier_0, high_bitdepth, twelve_bit, monochrome
+        )))
+    }
+}
+
+// vpcC: VP codec configuration (FullBox version=1)
+pub struct VpccDecoder;
+
+impl BoxDecoder for VpccDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let profile = r.read_u8()?;
+        let level = r.read_u8()?;
+        let byte3 = r.read_u8()?;
+        let bit_depth = (byte3 >> 4) & 0x0F;
+        let chroma_subsampling = (byte3 >> 1) & 0x07;
+        let full_range = byte3 & 0x01;
+        let colour_primaries = r.read_u8()?;
+        let transfer = r.read_u8()?;
+        let matrix = r.read_u8()?;
+        Ok(BoxValue::Text(format!(
+            "profile={} level={} bit_depth={} chroma={} full_range={} primaries={} transfer={} matrix={}",
+            profile, level, bit_depth, chroma_subsampling, full_range, colour_primaries, transfer, matrix
+        )))
+    }
+}
+
+// dOps: Opus specific box
+pub struct DopsDecoder;
+
+impl BoxDecoder for DopsDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let version = r.read_u8()?;
+        let channels = r.read_u8()?;
+        let pre_skip = r.read_u16::<BigEndian>()?;
+        let input_sample_rate = r.read_u32::<LittleEndian>()?; // native Ogg byte order
+        let output_gain = r.read_i16::<BigEndian>()?;
+        let mapping_family = r.read_u8()?;
+        Ok(BoxValue::Text(format!(
+            "version={} channels={} pre_skip={} input_sample_rate={} output_gain={} mapping_family={}",
+            version, channels, pre_skip, input_sample_rate, output_gain, mapping_family
+        )))
+    }
+}
+
+// dac3: AC-3 bitstream information
+pub struct Dac3Decoder;
+
+impl BoxDecoder for Dac3Decoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let buf = read_all(r)?;
+        if buf.len() < 3 {
+            return Ok(BoxValue::Bytes(buf));
+        }
+        let b0 = buf[0] as u32;
+        let b1 = buf[1] as u32;
+        let b2 = buf[2] as u32;
+        let fscod = (b0 >> 6) & 0x03;
+        let bsid = (b0 >> 1) & 0x1F;
+        let bsmod = ((b0 & 0x01) << 2) | ((b1 >> 6) & 0x03);
+        let acmod = (b1 >> 3) & 0x07;
+        let lfeon = (b1 >> 2) & 0x01;
+        let bit_rate_code = ((b1 & 0x03) << 3) | ((b2 >> 5) & 0x07);
+        let sample_rates = [48000u32, 44100, 32000, 0];
+        let sample_rate = sample_rates[fscod as usize];
+        Ok(BoxValue::Text(format!(
+            "fscod={} bsid={} bsmod={} acmod={} lfeon={} bit_rate_code={} sample_rate={}",
+            fscod, bsid, bsmod, acmod, lfeon, bit_rate_code, sample_rate
+        )))
+    }
+}
+
+// dec3: Enhanced AC-3 bitstream information
+pub struct Dec3Decoder;
+
+impl BoxDecoder for Dec3Decoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let buf = read_all(r)?;
+        if buf.len() < 2 {
+            return Ok(BoxValue::Bytes(buf));
+        }
+        let word = ((buf[0] as u16) << 8) | buf[1] as u16;
+        let data_rate = (word >> 3) & 0x1FFF;
+        let num_ind_sub = (word & 0x07) + 1;
+        Ok(BoxValue::Text(format!(
+            "data_rate={}kbps num_independent_substreams={}",
+            data_rate, num_ind_sub
+        )))
+    }
+}
+
+// dfLa: FLAC specific box (FullBox, then METADATA_BLOCK_HEADER + STREAMINFO)
+pub struct DflaDecoder;
+
+impl BoxDecoder for DflaDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let buf = read_all(r)?;
+        if buf.len() < 4 {
+            return Ok(BoxValue::Bytes(buf));
+        }
+        let block_type = buf[0] & 0x7F;
+        if block_type != 0 || buf.len() < 4 + 34 {
+            return Ok(BoxValue::Text(format!(
+                "FLAC block_type={} ({} bytes)",
+                block_type,
+                buf.len().saturating_sub(4)
+            )));
+        }
+        // STREAMINFO starts at buf[4]
+        let s = &buf[4..];
+        let sample_rate =
+            ((s[10] as u32) << 12) | ((s[11] as u32) << 4) | ((s[12] as u32) >> 4);
+        let channels = ((s[12] >> 1) & 0x07) + 1;
+        let bits_per_sample = (((s[12] & 0x01) << 4) | (s[13] >> 4)) + 1;
+        let total_samples = (((s[13] & 0x0F) as u64) << 32)
+            | ((s[14] as u64) << 24)
+            | ((s[15] as u64) << 16)
+            | ((s[16] as u64) << 8)
+            | (s[17] as u64);
+        Ok(BoxValue::Text(format!(
+            "sample_rate={} channels={} bits_per_sample={} total_samples={}",
+            sample_rate, channels, bits_per_sample, total_samples
+        )))
+    }
+}
+
+// colr: colour information
+pub struct ColrDecoder;
+
+impl BoxDecoder for ColrDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let buf = read_all(r)?;
+        if buf.len() < 4 {
+            return Ok(BoxValue::Bytes(buf));
+        }
+        let colour_type = &buf[0..4];
+        let type_str = String::from_utf8_lossy(colour_type).to_string();
+        if colour_type == b"nclx" && buf.len() >= 11 {
+            let primaries = u16::from_be_bytes(buf[4..6].try_into().unwrap());
+            let transfer = u16::from_be_bytes(buf[6..8].try_into().unwrap());
+            let matrix = u16::from_be_bytes(buf[8..10].try_into().unwrap());
+            let full_range = (buf[10] >> 7) & 1;
+            Ok(BoxValue::Text(format!(
+                "type=nclx primaries={} transfer={} matrix={} full_range={}",
+                primaries, transfer, matrix, full_range
+            )))
+        } else {
+            Ok(BoxValue::Text(format!(
+                "type={} ({} bytes)",
+                type_str,
+                buf.len().saturating_sub(4)
+            )))
+        }
+    }
+}
+
+// pasp: pixel aspect ratio
+pub struct PaspDecoder;
+
+impl BoxDecoder for PaspDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let h = r.read_u32::<BigEndian>()?;
+        let v = r.read_u32::<BigEndian>()?;
+        Ok(BoxValue::Text(format!("h_spacing={} v_spacing={}", h, v)))
+    }
+}
+
+// mdcv: mastering display color volume
+pub struct MdcvDecoder;
+
+impl BoxDecoder for MdcvDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let buf = read_all(r)?;
+        if buf.len() < 24 {
+            return Ok(BoxValue::Bytes(buf));
+        }
+        let rx = u16::from_be_bytes(buf[0..2].try_into().unwrap());
+        let ry = u16::from_be_bytes(buf[2..4].try_into().unwrap());
+        let gx = u16::from_be_bytes(buf[4..6].try_into().unwrap());
+        let gy = u16::from_be_bytes(buf[6..8].try_into().unwrap());
+        let bx = u16::from_be_bytes(buf[8..10].try_into().unwrap());
+        let by_ = u16::from_be_bytes(buf[10..12].try_into().unwrap());
+        let wx = u16::from_be_bytes(buf[12..14].try_into().unwrap());
+        let wy = u16::from_be_bytes(buf[14..16].try_into().unwrap());
+        let max_lum = u32::from_be_bytes(buf[16..20].try_into().unwrap());
+        let min_lum = u32::from_be_bytes(buf[20..24].try_into().unwrap());
+        Ok(BoxValue::Text(format!(
+            "R({},{}) G({},{}) B({},{}) W({},{}) max_luminance={:.4} min_luminance={:.4} cd/m2",
+            rx, ry, gx, gy, bx, by_, wx, wy,
+            max_lum as f64 / 10000.0,
+            min_lum as f64 / 10000.0
+        )))
+    }
+}
+
+// clli: content light level information
+pub struct ClliDecoder;
+
+impl BoxDecoder for ClliDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let max_cll = r.read_u16::<BigEndian>()?;
+        let max_fall = r.read_u16::<BigEndian>()?;
+        Ok(BoxValue::Text(format!(
+            "max_cll={} max_fall={}",
+            max_cll, max_fall
+        )))
+    }
+}
+
+// kind: track kind (FullBox; version/flags pre-stripped)
+pub struct KindDecoder;
+
+impl BoxDecoder for KindDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let buf = read_all(r)?;
+        let mut parts = buf.splitn(3, |&b| b == 0);
+        let scheme = parts
+            .next()
+            .map(|s| String::from_utf8_lossy(s).to_string())
+            .unwrap_or_default();
+        let value = parts
+            .next()
+            .map(|s| String::from_utf8_lossy(s).to_string())
+            .unwrap_or_default();
+        Ok(BoxValue::Text(format!(
+            "scheme_uri={:?} value={:?}",
+            scheme, value
+        )))
+    }
+}
+
+// irot: image rotation
+pub struct IrotDecoder;
+
+impl BoxDecoder for IrotDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let byte = r.read_u8()?;
+        let degrees = (byte & 0x03) * 90;
+        Ok(BoxValue::Text(format!("angle={}°", degrees)))
+    }
+}
+
+// imir: image mirror
+pub struct ImirDecoder;
+
+impl BoxDecoder for ImirDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let byte = r.read_u8()?;
+        let axis = if byte & 0x01 == 0 {
+            "vertical (top-bottom)"
+        } else {
+            "horizontal (left-right)"
+        };
+        Ok(BoxValue::Text(format!("axis={}", axis)))
+    }
+}
+
+// data: iTunes metadata value (FullBox; flags = type_indicator)
+pub struct IlstDataDecoder;
+
+impl BoxDecoder for IlstDataDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let type_code = flags.unwrap_or(0) & 0x00FFFFFF;
+        let _locale = r.read_u32::<BigEndian>()?;
+        let buf = read_all(r)?;
+        match type_code {
+            1 => Ok(BoxValue::Text(format!(
+                "type=utf8 value={:?}",
+                String::from_utf8_lossy(&buf)
+            ))),
+            13 => Ok(BoxValue::Text(format!("type=jpeg ({} bytes)", buf.len()))),
+            14 => Ok(BoxValue::Text(format!("type=png ({} bytes)", buf.len()))),
+            21 => {
+                let v: i64 = match buf.len() {
+                    1 => buf[0] as i8 as i64,
+                    2 => i16::from_be_bytes([buf[0], buf[1]]) as i64,
+                    4 => i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as i64,
+                    8 => i64::from_be_bytes(buf[..8].try_into().unwrap_or([0; 8])),
+                    _ => 0,
+                };
+                Ok(BoxValue::Text(format!("type=int value={}", v)))
+            }
+            22 => {
+                let v: u64 = match buf.len() {
+                    1 => buf[0] as u64,
+                    2 => u16::from_be_bytes([buf[0], buf[1]]) as u64,
+                    4 => u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as u64,
+                    8 => u64::from_be_bytes(buf[..8].try_into().unwrap_or([0; 8])),
+                    _ => 0,
+                };
+                Ok(BoxValue::Text(format!("type=uint value={}", v)))
+            }
+            _ => Ok(BoxValue::Text(format!(
+                "type_code={} ({} bytes)",
+                type_code,
+                buf.len()
+            ))),
+        }
+    }
+}
+
+// mean: iTunes reverse DNS domain (FullBox; version/flags pre-stripped)
+pub struct MeanDecoder;
+
+impl BoxDecoder for MeanDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let buf = read_all(r)?;
+        Ok(BoxValue::Text(format!(
+            "domain={:?}",
+            String::from_utf8_lossy(&buf)
+        )))
+    }
+}
+
+// name: iTunes reverse DNS name (FullBox; version/flags pre-stripped)
+pub struct IlstNameDecoder;
+
+impl BoxDecoder for IlstNameDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let buf = read_all(r)?;
+        Ok(BoxValue::Text(format!(
+            "name={:?}",
+            String::from_utf8_lossy(&buf)
+        )))
+    }
+}
+
+// trun: track fragment run (FullBox)
+pub struct TrunDecoder;
+
+impl BoxDecoder for TrunDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        version: Option<u8>,
+        flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let ver = version.unwrap_or(0);
+        let fl = flags.unwrap_or(0);
+
+        let sample_count = r.read_u32::<BigEndian>()?;
+        let data_offset = if fl & 0x000001 != 0 {
+            Some(r.read_i32::<BigEndian>()?)
+        } else {
+            None
+        };
+        let first_sample_flags = if fl & 0x000004 != 0 {
+            Some(r.read_u32::<BigEndian>()?)
+        } else {
+            None
+        };
+
+        let mut samples = Vec::new();
+        for _ in 0..sample_count {
+            let duration = if fl & 0x000100 != 0 {
+                Some(r.read_u32::<BigEndian>()?)
+            } else {
+                None
+            };
+            let size = if fl & 0x000200 != 0 {
+                Some(r.read_u32::<BigEndian>()?)
+            } else {
+                None
+            };
+            let sflags = if fl & 0x000400 != 0 {
+                Some(r.read_u32::<BigEndian>()?)
+            } else {
+                None
+            };
+            let cto = if fl & 0x000800 != 0 {
+                if ver == 1 {
+                    Some(r.read_i32::<BigEndian>()?)
+                } else {
+                    Some(r.read_u32::<BigEndian>()? as i32)
+                }
+            } else {
+                None
+            };
+            samples.push(TrunSample {
+                duration,
+                size,
+                flags: sflags,
+                composition_time_offset: cto,
+            });
+        }
+
+        Ok(BoxValue::Structured(StructuredData::TrackFragmentRun(
+            TrunData {
+                version: ver,
+                flags: fl,
+                sample_count,
+                data_offset,
+                first_sample_flags,
+                samples,
+            },
+        )))
+    }
+}
+
+// tfhd: track fragment header (FullBox)
+pub struct TfhdDecoder;
+
+impl BoxDecoder for TfhdDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let fl = flags.unwrap_or(0);
+        let track_id = r.read_u32::<BigEndian>()?;
+        let base_data_offset = if fl & 0x000001 != 0 {
+            Some(r.read_u64::<BigEndian>()?)
+        } else {
+            None
+        };
+        let sample_description_index = if fl & 0x000002 != 0 {
+            Some(r.read_u32::<BigEndian>()?)
+        } else {
+            None
+        };
+        let default_duration = if fl & 0x000008 != 0 {
+            Some(r.read_u32::<BigEndian>()?)
+        } else {
+            None
+        };
+        let default_size = if fl & 0x000010 != 0 {
+            Some(r.read_u32::<BigEndian>()?)
+        } else {
+            None
+        };
+        let default_flags = if fl & 0x000020 != 0 {
+            Some(r.read_u32::<BigEndian>()?)
+        } else {
+            None
+        };
+
+        let mut parts = vec![format!("track_id={}", track_id)];
+        if let Some(v) = base_data_offset {
+            parts.push(format!("base_data_offset={}", v));
+        }
+        if let Some(v) = sample_description_index {
+            parts.push(format!("sample_description_index={}", v));
+        }
+        if let Some(v) = default_duration {
+            parts.push(format!("default_duration={}", v));
+        }
+        if let Some(v) = default_size {
+            parts.push(format!("default_size={}", v));
+        }
+        if let Some(v) = default_flags {
+            parts.push(format!("default_flags=0x{:08X}", v));
+        }
+        if fl & 0x010000 != 0 {
+            parts.push("default_base_is_moof".into());
+        }
+        Ok(BoxValue::Text(parts.join(" ")))
+    }
+}
+
+// tfdt: track fragment decode time (FullBox)
+pub struct TfdtDecoder;
+
+impl BoxDecoder for TfdtDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let base_decode_time = if version.unwrap_or(0) == 1 {
+            r.read_u64::<BigEndian>()?
+        } else {
+            r.read_u32::<BigEndian>()? as u64
+        };
+        Ok(BoxValue::Text(format!(
+            "base_media_decode_time={}",
+            base_decode_time
+        )))
+    }
+}
+
+// trex: track extends (FullBox)
+pub struct TrexDecoder;
+
+impl BoxDecoder for TrexDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let track_id = r.read_u32::<BigEndian>()?;
+        let default_sample_description_index = r.read_u32::<BigEndian>()?;
+        let default_sample_duration = r.read_u32::<BigEndian>()?;
+        let default_sample_size = r.read_u32::<BigEndian>()?;
+        let default_sample_flags = r.read_u32::<BigEndian>()?;
+        Ok(BoxValue::Text(format!(
+            "track_id={} default_sample_description_index={} default_sample_duration={} default_sample_size={} default_sample_flags=0x{:08X}",
+            track_id,
+            default_sample_description_index,
+            default_sample_duration,
+            default_sample_size,
+            default_sample_flags
+        )))
+    }
+}
+
 // ---------- Default registry ----------
 pub fn default_registry() -> Registry {
     use crate::boxes::BoxKey;
@@ -1120,5 +1891,115 @@ pub fn default_registry() -> Registry {
             BoxKey::FourCC(FourCC(*b"elst")),
             "elst",
             Box::new(ElstDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"btrt")),
+            "btrt",
+            Box::new(BtrtDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"esds")),
+            "esds",
+            Box::new(EsdsDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"av1C")),
+            "av1C",
+            Box::new(Av1cDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"vpcC")),
+            "vpcC",
+            Box::new(VpccDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"dOps")),
+            "dOps",
+            Box::new(DopsDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"dac3")),
+            "dac3",
+            Box::new(Dac3Decoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"dec3")),
+            "dec3",
+            Box::new(Dec3Decoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"dfLa")),
+            "dfLa",
+            Box::new(DflaDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"colr")),
+            "colr",
+            Box::new(ColrDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"pasp")),
+            "pasp",
+            Box::new(PaspDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"mdcv")),
+            "mdcv",
+            Box::new(MdcvDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"clli")),
+            "clli",
+            Box::new(ClliDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"kind")),
+            "kind",
+            Box::new(KindDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"irot")),
+            "irot",
+            Box::new(IrotDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"imir")),
+            "imir",
+            Box::new(ImirDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"data")),
+            "data",
+            Box::new(IlstDataDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"mean")),
+            "mean",
+            Box::new(MeanDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"name")),
+            "name",
+            Box::new(IlstNameDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"trun")),
+            "trun",
+            Box::new(TrunDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"tfhd")),
+            "tfhd",
+            Box::new(TfhdDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"tfdt")),
+            "tfdt",
+            Box::new(TfdtDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"trex")),
+            "trex",
+            Box::new(TrexDecoder),
         )
 }

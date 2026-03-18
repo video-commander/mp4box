@@ -21,6 +21,7 @@ pub enum KnownBox {
     Emsg,
     Mfra,
     Mfro,
+    Pdin,
 
     // moov children
     Mvhd,
@@ -35,6 +36,7 @@ pub enum KnownBox {
     Tref,
     Iprp,
     Meco,
+    Ludt,
 
     // edts children
     Elst,
@@ -49,8 +51,17 @@ pub enum KnownBox {
     Smhd,
     Hmhd,
     Nmhd,
+    Sthd,
     Dinf,
     Stbl,
+    Gmhd,
+
+    // gmhd children
+    Gmin,
+    Glbl,
+
+    // ludt children
+    Kind,
 
     // dinf children
     Dref,
@@ -100,6 +111,15 @@ pub enum KnownBox {
     Hvcc,
     Avcc,
     Pitm,
+    Irot,
+    Imir,
+    Rloc,
+    Lsel,
+    Tols,
+    A1lx,
+    A1op,
+    Idat,
+    Ipro,
 
     // Encryption / CENC
     Sinf,
@@ -123,6 +143,18 @@ pub enum KnownBox {
     Vp08,
     Vp09,
     Av01,
+    Dvh1,
+    Dvhe,
+    Dav1,
+    Tx3g,
+    Wvtt,
+    Stpp,
+    Tmcd,
+    Encv,
+    Enca,
+    Enct,
+    Ipcm,
+    Fpcm,
 
     // Sample entries (audio)
     Mp4a,
@@ -133,6 +165,55 @@ pub enum KnownBox {
     Sawb,
     Alac,
     Flac,
+
+    // Codec configuration boxes (children of sample entries)
+    Esds,
+    Av1c,
+    Vpcc,
+    Dops,
+    Dac3,
+    Dec3,
+    Dfla,
+    Dvcc,
+    Btrt,
+
+    // iTunes metadata
+    Ilst,
+    IlstData,
+    Mean,
+    IlstName,
+
+    // WebVTT
+    Vttc,
+
+    // HDR / color metadata
+    Mdcv,
+    Clli,
+
+    // Spherical / 360 video
+    St3d,
+    Sv3d,
+    Proj,
+    Prhd,
+    Equi,
+    Cbmp,
+
+    // ISOBMFF extras
+    Xml,
+    Bxml,
+    Ainf,
+    Leva,
+    Trep,
+
+    // PCM audio
+    Srat,
+    Chnl,
+    Pcmc,
+
+    // QuickTime-specific
+    Wave,
+    Chan,
+    Tcmi,
 
     // Misc / QT-ish / common extras
     Pasp,
@@ -167,6 +248,7 @@ impl From<FourCC> for KnownBox {
             b"emsg" => KnownBox::Emsg,
             b"mfra" => KnownBox::Mfra,
             b"mfro" => KnownBox::Mfro,
+            b"pdin" => KnownBox::Pdin,
 
             b"mvhd" => KnownBox::Mvhd,
             b"trak" => KnownBox::Trak,
@@ -179,6 +261,7 @@ impl From<FourCC> for KnownBox {
             b"tref" => KnownBox::Tref,
             b"iprp" => KnownBox::Iprp,
             b"meco" => KnownBox::Meco,
+            b"ludt" => KnownBox::Ludt,
 
             b"elst" => KnownBox::Elst,
 
@@ -190,8 +273,15 @@ impl From<FourCC> for KnownBox {
             b"smhd" => KnownBox::Smhd,
             b"hmhd" => KnownBox::Hmhd,
             b"nmhd" => KnownBox::Nmhd,
+            b"sthd" => KnownBox::Sthd,
             b"dinf" => KnownBox::Dinf,
             b"stbl" => KnownBox::Stbl,
+            b"gmhd" => KnownBox::Gmhd,
+
+            b"gmin" => KnownBox::Gmin,
+            b"glbl" => KnownBox::Glbl,
+
+            b"kind" => KnownBox::Kind,
 
             b"dref" => KnownBox::Dref,
 
@@ -237,6 +327,15 @@ impl From<FourCC> for KnownBox {
             b"hvcC" => KnownBox::Hvcc,
             b"avcC" => KnownBox::Avcc,
             b"pitm" => KnownBox::Pitm,
+            b"irot" => KnownBox::Irot,
+            b"imir" => KnownBox::Imir,
+            b"rloc" => KnownBox::Rloc,
+            b"lsel" => KnownBox::Lsel,
+            b"tols" => KnownBox::Tols,
+            b"a1lx" => KnownBox::A1lx,
+            b"a1op" => KnownBox::A1op,
+            b"idat" => KnownBox::Idat,
+            b"ipro" => KnownBox::Ipro,
 
             b"sinf" => KnownBox::Sinf,
             b"schm" => KnownBox::Schm,
@@ -258,6 +357,18 @@ impl From<FourCC> for KnownBox {
             b"vp08" => KnownBox::Vp08,
             b"vp09" => KnownBox::Vp09,
             b"av01" => KnownBox::Av01,
+            b"dvh1" => KnownBox::Dvh1,
+            b"dvhe" => KnownBox::Dvhe,
+            b"dav1" => KnownBox::Dav1,
+            b"tx3g" => KnownBox::Tx3g,
+            b"wvtt" => KnownBox::Wvtt,
+            b"stpp" => KnownBox::Stpp,
+            b"tmcd" => KnownBox::Tmcd,
+            b"encv" => KnownBox::Encv,
+            b"enca" => KnownBox::Enca,
+            b"enct" => KnownBox::Enct,
+            b"ipcm" => KnownBox::Ipcm,
+            b"fpcm" => KnownBox::Fpcm,
 
             b"mp4a" => KnownBox::Mp4a,
             b"ac-3" => KnownBox::Ac3,
@@ -266,7 +377,48 @@ impl From<FourCC> for KnownBox {
             b"samr" => KnownBox::Samr,
             b"sawb" => KnownBox::Sawb,
             b"alac" => KnownBox::Alac,
-            b"flac" => KnownBox::Flac,
+            b"fLaC" => KnownBox::Flac,
+
+            b"esds" => KnownBox::Esds,
+            b"av1C" => KnownBox::Av1c,
+            b"vpcC" => KnownBox::Vpcc,
+            b"dOps" => KnownBox::Dops,
+            b"dac3" => KnownBox::Dac3,
+            b"dec3" => KnownBox::Dec3,
+            b"dfLa" => KnownBox::Dfla,
+            b"dvcC" => KnownBox::Dvcc,
+            b"btrt" => KnownBox::Btrt,
+
+            b"ilst" => KnownBox::Ilst,
+            b"data" => KnownBox::IlstData,
+            b"mean" => KnownBox::Mean,
+            b"name" => KnownBox::IlstName,
+
+            b"vttC" => KnownBox::Vttc,
+
+            b"mdcv" => KnownBox::Mdcv,
+            b"clli" => KnownBox::Clli,
+
+            b"st3d" => KnownBox::St3d,
+            b"sv3d" => KnownBox::Sv3d,
+            b"proj" => KnownBox::Proj,
+            b"prhd" => KnownBox::Prhd,
+            b"equi" => KnownBox::Equi,
+            b"cbmp" => KnownBox::Cbmp,
+
+            b"xml " => KnownBox::Xml,
+            b"bxml" => KnownBox::Bxml,
+            b"ainf" => KnownBox::Ainf,
+            b"leva" => KnownBox::Leva,
+            b"trep" => KnownBox::Trep,
+
+            b"srat" => KnownBox::Srat,
+            b"chnl" => KnownBox::Chnl,
+            b"pcmC" => KnownBox::Pcmc,
+
+            b"wave" => KnownBox::Wave,
+            b"chan" => KnownBox::Chan,
+            b"tcmi" => KnownBox::Tcmi,
 
             b"pasp" => KnownBox::Pasp,
             b"cslg" => KnownBox::Cslg,
@@ -305,6 +457,14 @@ impl KnownBox {
                 | KnownBox::Iref
                 | KnownBox::Ipco
                 | KnownBox::Ipma
+                | KnownBox::Ilst
+                | KnownBox::Ludt
+                | KnownBox::Gmhd
+                | KnownBox::Ipro
+                | KnownBox::Sv3d
+                | KnownBox::Proj
+                | KnownBox::Trep
+                | KnownBox::Wave
         )
     }
 
@@ -319,6 +479,7 @@ impl KnownBox {
                 | KnownBox::Vmhd
                 | KnownBox::Smhd
                 | KnownBox::Nmhd
+                | KnownBox::Sthd
                 | KnownBox::Dref
                 | KnownBox::Stts
                 | KnownBox::Ctts
@@ -353,6 +514,27 @@ impl KnownBox {
                 | KnownBox::Schi
                 | KnownBox::Saio
                 | KnownBox::Saiz
+                | KnownBox::Esds
+                | KnownBox::Vpcc
+                | KnownBox::Dfla
+                | KnownBox::Kind
+                | KnownBox::St3d
+                | KnownBox::Prhd
+                | KnownBox::Equi
+                | KnownBox::Cbmp
+                | KnownBox::Tols
+                | KnownBox::A1op
+                | KnownBox::Pdin
+                | KnownBox::Xml
+                | KnownBox::Bxml
+                | KnownBox::Ainf
+                | KnownBox::Leva
+                | KnownBox::Srat
+                | KnownBox::Chnl
+                | KnownBox::Gmin
+                | KnownBox::Mean
+                | KnownBox::IlstName
+                | KnownBox::IlstData
         )
     }
 }
@@ -376,6 +558,7 @@ impl KnownBox {
             KnownBox::Emsg => "Event Message Box",
             KnownBox::Mfra => "Movie Fragment Random Access Box",
             KnownBox::Mfro => "Movie Fragment Random Access Offset Box",
+            KnownBox::Pdin => "Progressive Download Information Box",
             KnownBox::Mvhd => "Movie Header Box",
             KnownBox::Trak => "Track Box",
             KnownBox::Mvex => "Movie Extends Box",
@@ -386,6 +569,7 @@ impl KnownBox {
             KnownBox::Tref => "Track Reference Box",
             KnownBox::Iprp => "Item Properties Box",
             KnownBox::Meco => "Additional Metadata Container Box",
+            KnownBox::Ludt => "Track User Data Box",
             KnownBox::Elst => "Edit List Box",
             KnownBox::Mdhd => "Media Header Box",
             KnownBox::Hdlr => "Handler Reference Box",
@@ -394,8 +578,13 @@ impl KnownBox {
             KnownBox::Smhd => "Sound Media Header Box",
             KnownBox::Hmhd => "Hint Media Header Box",
             KnownBox::Nmhd => "Null Media Header Box",
+            KnownBox::Sthd => "Subtitle Media Header Box",
             KnownBox::Dinf => "Data Information Box",
             KnownBox::Stbl => "Sample Table Box",
+            KnownBox::Gmhd => "Generic Media Header Box",
+            KnownBox::Gmin => "Base Media Information Header Box",
+            KnownBox::Glbl => "Global Sample Description Box",
+            KnownBox::Kind => "Track Kind Box",
             KnownBox::Dref => "Data Reference Box",
             KnownBox::Stsd => "Sample Description Box",
             KnownBox::Stts => "Decoding Time-to-Sample Box",
@@ -437,6 +626,15 @@ impl KnownBox {
             KnownBox::Hvcc => "HEVC Decoder Configuration Box",
             KnownBox::Avcc => "AVC Decoder Configuration Box",
             KnownBox::Pitm => "Primary Item Box",
+            KnownBox::Irot => "Image Rotation Box",
+            KnownBox::Imir => "Image Mirror Box",
+            KnownBox::Rloc => "Relative Location Box",
+            KnownBox::Lsel => "Layer Selector Box",
+            KnownBox::Tols => "Target Output Layer Set Box",
+            KnownBox::A1lx => "AV1 Layer Extents Box",
+            KnownBox::A1op => "AV1 Operating Point Selector Box",
+            KnownBox::Idat => "Item Data Box",
+            KnownBox::Ipro => "Item Protection Box",
             KnownBox::Sinf => "Protection Scheme Information Box",
             KnownBox::Schm => "Scheme Type Box",
             KnownBox::Schi => "Scheme Information Box",
@@ -456,6 +654,18 @@ impl KnownBox {
             KnownBox::Vp08 => "VP8 Video Sample Entry",
             KnownBox::Vp09 => "VP9 Video Sample Entry",
             KnownBox::Av01 => "AV1 Video Sample Entry",
+            KnownBox::Dvh1 => "Dolby Vision HEVC Sample Entry (dvh1)",
+            KnownBox::Dvhe => "Dolby Vision HEVC Sample Entry (dvhe)",
+            KnownBox::Dav1 => "Dolby Vision AV1 Sample Entry",
+            KnownBox::Tx3g => "3GPP Timed Text Sample Entry",
+            KnownBox::Wvtt => "WebVTT Sample Entry",
+            KnownBox::Stpp => "TTML Sample Entry",
+            KnownBox::Tmcd => "Timecode Sample Entry",
+            KnownBox::Encv => "Encrypted Video Sample Entry",
+            KnownBox::Enca => "Encrypted Audio Sample Entry",
+            KnownBox::Enct => "Encrypted Text Sample Entry",
+            KnownBox::Ipcm => "In-band PCM Sample Entry",
+            KnownBox::Fpcm => "Float PCM Sample Entry",
             KnownBox::Mp4a => "MPEG-4 Audio Sample Entry",
             KnownBox::Ac3 => "AC-3 Audio Sample Entry",
             KnownBox::Ec3 => "Enhanced AC-3 Audio Sample Entry",
@@ -464,6 +674,39 @@ impl KnownBox {
             KnownBox::Sawb => "AMR-WB Audio Sample Entry",
             KnownBox::Alac => "Apple Lossless Sample Entry",
             KnownBox::Flac => "FLAC Audio Sample Entry",
+            KnownBox::Esds => "Elementary Stream Descriptor",
+            KnownBox::Av1c => "AV1 Codec Configuration Box",
+            KnownBox::Vpcc => "VP Codec Configuration Box",
+            KnownBox::Dops => "Opus Specific Box",
+            KnownBox::Dac3 => "AC-3 Bitstream Information Box",
+            KnownBox::Dec3 => "Enhanced AC-3 Bitstream Information Box",
+            KnownBox::Dfla => "FLAC Specific Box",
+            KnownBox::Dvcc => "Dolby Vision Configuration Box",
+            KnownBox::Btrt => "Bitrate Box",
+            KnownBox::Ilst => "iTunes Metadata List",
+            KnownBox::IlstData => "iTunes Metadata Value",
+            KnownBox::Mean => "iTunes Reverse DNS Domain",
+            KnownBox::IlstName => "iTunes Reverse DNS Name",
+            KnownBox::Vttc => "WebVTT Configuration Box",
+            KnownBox::Mdcv => "Mastering Display Color Volume Box",
+            KnownBox::Clli => "Content Light Level Information Box",
+            KnownBox::St3d => "Stereo 3D Box",
+            KnownBox::Sv3d => "Spherical Video V2 Box",
+            KnownBox::Proj => "Projection Box",
+            KnownBox::Prhd => "Projection Header Box",
+            KnownBox::Equi => "Equirectangular Projection Box",
+            KnownBox::Cbmp => "Cube Map Projection Box",
+            KnownBox::Xml => "XML Box",
+            KnownBox::Bxml => "Binary XML Box",
+            KnownBox::Ainf => "Asset Information Box",
+            KnownBox::Leva => "Level Assignment Box",
+            KnownBox::Trep => "Track Extension Properties Box",
+            KnownBox::Srat => "Sampling Rate Box",
+            KnownBox::Chnl => "Channel Layout Box",
+            KnownBox::Pcmc => "PCM Configuration Box",
+            KnownBox::Wave => "WAVE Configuration Box",
+            KnownBox::Chan => "Audio Channel Layout Box",
+            KnownBox::Tcmi => "Timecode Media Information Box",
             KnownBox::Pasp => "Pixel Aspect Ratio Box",
             KnownBox::Cslg => "Composition Shift Least Greatest Box",
             KnownBox::Cprt => "Copyright Box",

@@ -4,7 +4,7 @@ use mp4box::{
     boxes::{BoxKey, BoxRef, FourCC, NodeKind},
     known_boxes::KnownBox,
     parser::{parse_children, read_box_header},
-    registry::{BoxValue, Registry, default_registry},
+    registry::{BoxValue, Registry, StructuredData, default_registry},
     util::{hex_dump, read_slice},
 };
 use serde::Serialize;
@@ -187,9 +187,13 @@ fn print_box(
 fn display_type(h: &mp4box::boxes::BoxHeader) -> String {
     if &h.typ.0 == b"uuid" {
         let u = h.uuid.unwrap_or([0u8; 16]);
-        format!("uuid:{:02x?}", u)
+        format!("uuid:{}", u.iter().map(|b| format!("{:02x}", b)).collect::<String>())
     } else {
-        h.typ.to_string()
+        let kb = KnownBox::from(h.typ);
+        match kb {
+            KnownBox::Unknown(_) => h.typ.to_string(),
+            _ => format!("{} ({})", h.typ, kb.full_name()),
+        }
     }
 }
 
@@ -224,6 +228,66 @@ fn payload_region(b: &BoxRef) -> Option<(BoxKey, u64, u64)> {
     }
 }
 
+fn format_structured(data: &StructuredData) -> String {
+    use mp4box::registry::*;
+    match data {
+        StructuredData::TrackHeader(d) => format!(
+            "track_id={} duration={} width={} height={} flags=0x{:06X}",
+            d.track_id, d.duration, d.width, d.height, d.flags
+        ),
+        StructuredData::MediaHeader(d) => format!(
+            "timescale={} duration={} language={}",
+            d.timescale, d.duration, d.language
+        ),
+        StructuredData::HandlerReference(d) => format!(
+            "handler_type={} name={:?}",
+            d.handler_type, d.name
+        ),
+        StructuredData::SampleDescription(d) => {
+            let e = d.entries.first();
+            match e {
+                Some(e) => match (e.width, e.height) {
+                    (Some(w), Some(h)) => format!("codec={} {}x{} entries={}", e.codec, w, h, d.entry_count),
+                    _ => format!("codec={} entries={}", e.codec, d.entry_count),
+                },
+                None => format!("entries=0"),
+            }
+        }
+        StructuredData::DecodingTimeToSample(d) => {
+            let summary: Vec<String> = d.entries.iter().take(4)
+                .map(|e| format!("{}×{}", e.sample_count, e.sample_delta))
+                .collect();
+            let ellipsis = if d.entry_count > 4 { ", …" } else { "" };
+            format!("entries={} [{}{}]", d.entry_count, summary.join(", "), ellipsis)
+        }
+        StructuredData::CompositionTimeToSample(d) => format!("entries={}", d.entry_count),
+        StructuredData::SampleToChunk(d) => format!("entries={}", d.entry_count),
+        StructuredData::SampleSize(d) => {
+            if d.sample_size > 0 {
+                format!("fixed_size={} count={}", d.sample_size, d.sample_count)
+            } else {
+                format!("variable count={}", d.sample_count)
+            }
+        }
+        StructuredData::SyncSample(d) => format!("keyframes={}", d.entry_count),
+        StructuredData::ChunkOffset(d) => format!("chunks={}", d.entry_count),
+        StructuredData::ChunkOffset64(d) => format!("chunks={}", d.entry_count),
+        StructuredData::TrackFragmentRun(d) => {
+            let mut parts = vec![format!("samples={}", d.sample_count)];
+            if let Some(off) = d.data_offset { parts.push(format!("data_offset={}", off)); }
+            let has_dur = d.flags & 0x100 != 0;
+            let has_size = d.flags & 0x200 != 0;
+            if has_dur || has_size {
+                if let Some(first) = d.samples.first() {
+                    if let Some(dur) = first.duration { parts.push(format!("first_dur={}", dur)); }
+                    if let Some(sz) = first.size { parts.push(format!("first_size={}", sz)); }
+                }
+            }
+            parts.join(" ")
+        }
+    }
+}
+
 fn decode_value(f: &mut File, b: &BoxRef, reg: &Registry) -> Option<String> {
     let (key, off, len) = payload_region(b)?;
     if len == 0 {
@@ -245,7 +309,7 @@ fn decode_value(f: &mut File, b: &BoxRef, reg: &Registry) -> Option<String> {
         match res {
             Ok(BoxValue::Text(s)) => Some(s),
             Ok(BoxValue::Bytes(bytes)) => Some(format!("{} bytes", bytes.len())),
-            Ok(BoxValue::Structured(data)) => Some(format!("structured: {:?}", data)),
+            Ok(BoxValue::Structured(data)) => Some(format_structured(&data)),
             Err(e) => Some(format!("[decode error: {}]", e)),
         }
     } else {

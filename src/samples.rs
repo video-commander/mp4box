@@ -455,6 +455,7 @@ fn extract_sample_tables(stbl_box: &crate::Box) -> anyhow::Result<SampleTables> 
                     crate::registry::StructuredData::MediaHeader(_) => {}
                     crate::registry::StructuredData::HandlerReference(_) => {}
                     crate::registry::StructuredData::TrackHeader(_) => {}
+                    crate::registry::StructuredData::TrackFragmentRun(_) => {}
                 }
             }
         }
