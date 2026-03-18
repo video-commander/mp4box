@@ -291,7 +291,9 @@ fn format_structured(data: &StructuredData) -> String {
             }
             let has_dur = d.flags & 0x100 != 0;
             let has_size = d.flags & 0x200 != 0;
-            if (has_dur || has_size) && let Some(first) = d.samples.first() {
+            if (has_dur || has_size)
+                && let Some(first) = d.samples.first()
+            {
                 if let Some(dur) = first.duration {
                     parts.push(format!("first_dur={}", dur));
                 }
