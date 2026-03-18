@@ -109,83 +109,82 @@ fn main() -> anyhow::Result<()> {
         && let Some(ref children) = moov.children
     {
         for trak in children.iter().filter(|b| b.typ == "trak") {
-                let track_id = trak
-                    .children
-                    .as_ref()
-                    .and_then(|c| c.iter().find(|b| b.typ == "tkhd"))
-                    .and_then(|t| t.structured_data.as_ref())
+            let track_id = trak
+                .children
+                .as_ref()
+                .and_then(|c| c.iter().find(|b| b.typ == "tkhd"))
+                .and_then(|t| t.structured_data.as_ref())
+                .and_then(|sd| {
+                    if let mp4box::registry::StructuredData::TrackHeader(d) = sd {
+                        Some(d.track_id)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+
+            // Navigate moov/trak/mdia/minf/stbl
+            let stbl = trak
+                .children
+                .as_ref()
+                .and_then(|c| c.iter().find(|b| b.typ == "mdia"))
+                .and_then(|b| b.children.as_ref())
+                .and_then(|c| c.iter().find(|b| b.typ == "minf"))
+                .and_then(|b| b.children.as_ref())
+                .and_then(|c| c.iter().find(|b| b.typ == "stbl"));
+
+            if let Some(stbl) = stbl
+                && let Some(ref stbl_children) = stbl.children
+            {
+                // Find codec from stsd
+                let codec = stbl_children
+                    .iter()
+                    .find(|b| b.typ == "stsd")
+                    .and_then(|b| b.structured_data.as_ref())
                     .and_then(|sd| {
-                        if let mp4box::registry::StructuredData::TrackHeader(d) = sd {
-                            Some(d.track_id)
+                        if let mp4box::registry::StructuredData::SampleDescription(d) = sd {
+                            d.entries.first().map(|e| e.codec.clone())
                         } else {
                             None
                         }
-                    })
-                    .unwrap_or(0);
+                    });
 
-                // Navigate moov/trak/mdia/minf/stbl
-                let stbl = trak
-                    .children
-                    .as_ref()
-                    .and_then(|c| c.iter().find(|b| b.typ == "mdia"))
-                    .and_then(|b| b.children.as_ref())
-                    .and_then(|c| c.iter().find(|b| b.typ == "minf"))
-                    .and_then(|b| b.children.as_ref())
-                    .and_then(|c| c.iter().find(|b| b.typ == "stbl"));
+                // Find sample count from stsz
+                let sample_count = stbl_children
+                    .iter()
+                    .find(|b| b.typ == "stsz")
+                    .and_then(|b| b.structured_data.as_ref())
+                    .and_then(|sd| {
+                        if let mp4box::registry::StructuredData::SampleSize(d) = sd {
+                            Some(d.sample_count)
+                        } else {
+                            None
+                        }
+                    });
 
-                if let Some(stbl) = stbl
-                    && let Some(ref stbl_children) = stbl.children
-                {
-                    // Find codec from stsd
-                        let codec = stbl_children
-                            .iter()
-                            .find(|b| b.typ == "stsd")
-                            .and_then(|b| b.structured_data.as_ref())
-                            .and_then(|sd| {
-                                if let mp4box::registry::StructuredData::SampleDescription(d) = sd {
-                                    d.entries.first().map(|e| e.codec.clone())
-                                } else {
-                                    None
-                                }
-                            });
+                // Find keyframe count from stss
+                let keyframes = stbl_children
+                    .iter()
+                    .find(|b| b.typ == "stss")
+                    .and_then(|b| b.structured_data.as_ref())
+                    .and_then(|sd| {
+                        if let mp4box::registry::StructuredData::SyncSample(d) = sd {
+                            Some(d.entry_count)
+                        } else {
+                            None
+                        }
+                    });
 
-                        // Find sample count from stsz
-                        let sample_count = stbl_children
-                            .iter()
-                            .find(|b| b.typ == "stsz")
-                            .and_then(|b| b.structured_data.as_ref())
-                            .and_then(|sd| {
-                                if let mp4box::registry::StructuredData::SampleSize(d) = sd {
-                                    Some(d.sample_count)
-                                } else {
-                                    None
-                                }
-                            });
-
-                        // Find keyframe count from stss
-                        let keyframes = stbl_children
-                            .iter()
-                            .find(|b| b.typ == "stss")
-                            .and_then(|b| b.structured_data.as_ref())
-                            .and_then(|sd| {
-                                if let mp4box::registry::StructuredData::SyncSample(d) = sd {
-                                    Some(d.entry_count)
-                                } else {
-                                    None
-                                }
-                            });
-
-                        println!(
-                            "\n  Track #{} sample table: codec={} samples={} keyframes={}",
-                            track_id,
-                            codec.as_deref().unwrap_or("?"),
-                            sample_count.map_or("?".into(), |n| n.to_string()),
-                            keyframes.map_or("?".into(), |n| n.to_string()),
-                        );
-                }
+                println!(
+                    "\n  Track #{} sample table: codec={} samples={} keyframes={}",
+                    track_id,
+                    codec.as_deref().unwrap_or("?"),
+                    sample_count.map_or("?".into(), |n| n.to_string()),
+                    keyframes.map_or("?".into(), |n| n.to_string()),
+                );
             }
+        }
     }
 
     Ok(())
 }
-
