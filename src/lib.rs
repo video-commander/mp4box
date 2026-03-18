@@ -85,6 +85,9 @@ pub mod registry;
 pub mod samples;
 pub mod util;
 
+#[cfg(feature = "edit")]
+pub mod edit;
+
 pub use boxes::{BoxHeader, BoxKey, BoxRef, FourCC, NodeKind};
 pub use parser::{parse_children, read_box_header};
 pub use registry::{
