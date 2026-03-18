@@ -93,5 +93,5 @@ pub use registry::{
 };
 
 // High-level API
-pub use api::{Box, HexDump, get_boxes, hex_range};
+pub use api::{Box, HexDump, get_boxes, get_boxes_with_registry, hex_range};
 pub use samples::{SampleInfo, TrackSamples, track_samples_from_path, track_samples_from_reader};

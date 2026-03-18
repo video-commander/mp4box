@@ -67,6 +67,31 @@ pub struct Box {
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn get_boxes<R: Read + Seek>(r: &mut R, size: u64, decode: bool) -> anyhow::Result<Vec<Box>> {
+    get_boxes_with_registry(r, size, decode, default_registry())
+}
+
+/// Parse an MP4/ISOBMFF file and return the complete box tree as JSON-serializable structures.
+///
+/// # Parameters
+/// - `r`: A reader that implements `Read + Seek` (e.g., `File`, `Cursor<Vec<u8>>`)
+/// - `size`: The total size of the MP4 data to parse (typically file length)
+/// - `decode`: Whether to decode known box types using the default registry
+///
+/// # Returns
+/// A vector of `Box` structs representing the top-level boxes in the file.
+/// Each box contains metadata (offset, size, type) and optionally decoded content.
+///
+/// # Example
+/// ```no_run
+/// use mp4box::{get_boxes_with_registry, registry::default_registry};
+/// use std::fs::File;
+///
+/// let mut file = File::open("video.mp4")?;
+/// let size = file.metadata()?.len();
+/// let boxes = get_boxes_with_registry(&mut file, size, true, default_registry())?; // decode known boxes
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn get_boxes_with_registry<R: Read + Seek>(r: &mut R, size: u64, decode: bool, registry: Registry) -> anyhow::Result<Vec<Box>> {
     // let mut f = File::open(&path)?;
     // let file_len = f.metadata()?.len();
 
@@ -114,10 +139,9 @@ pub fn get_boxes<R: Read + Seek>(r: &mut R, size: u64, decode: bool) -> anyhow::
     }
 
     // build JSON tree
-    let reg = default_registry();
     let json_boxes = boxes
         .iter()
-        .map(|b| build_box(r, b, decode, &reg))
+        .map(|b| build_box(r, b, decode, &registry))
         .collect();
 
     Ok(json_boxes)
