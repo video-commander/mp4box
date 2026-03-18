@@ -63,36 +63,32 @@ fn main() -> anyhow::Result<()> {
     let (total, decoded_count) = walk(&boxes, 0);
 
     println!("{:-<60}", "");
-    println!(
-        "Total: {} boxes  ({} decoded)",
-        total, decoded_count
-    );
+    println!("Total: {} boxes  ({} decoded)", total, decoded_count);
 
     // ---- Walk examples for specific box types ----
 
     // Find the ftyp box and print compatible brands
-    if let Some(ftyp) = boxes.iter().find(|b| b.typ == "ftyp") {
-        if let Some(ref text) = ftyp.decoded {
-            println!("\nFile type info: {}", text);
-        }
+    if let Some(ftyp) = boxes.iter().find(|b| b.typ == "ftyp")
+        && let Some(ref text) = ftyp.decoded
+    {
+        println!("\nFile type info: {}", text);
     }
 
     // Collect all track headers to summarize tracks
     let mut tracks: Vec<(u32, u64, f32, f32)> = Vec::new();
-    if let Some(moov) = boxes.iter().find(|b| b.typ == "moov") {
-        if let Some(ref children) = moov.children {
-            for trak in children.iter().filter(|b| b.typ == "trak") {
-                let tkhd = trak
-                    .children
-                    .as_ref()
-                    .and_then(|c| c.iter().find(|b| b.typ == "tkhd"));
-                if let Some(tkhd) = tkhd {
-                    if let Some(mp4box::registry::StructuredData::TrackHeader(ref d)) =
-                        tkhd.structured_data
-                    {
-                        tracks.push((d.track_id, d.duration, d.width, d.height));
-                    }
-                }
+    if let Some(moov) = boxes.iter().find(|b| b.typ == "moov")
+        && let Some(ref children) = moov.children
+    {
+        for trak in children.iter().filter(|b| b.typ == "trak") {
+            let tkhd = trak
+                .children
+                .as_ref()
+                .and_then(|c| c.iter().find(|b| b.typ == "tkhd"));
+            if let Some(tkhd) = tkhd
+                && let Some(mp4box::registry::StructuredData::TrackHeader(ref d)) =
+                    tkhd.structured_data
+            {
+                tracks.push((d.track_id, d.duration, d.width, d.height));
             }
         }
     }
@@ -109,9 +105,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Print sample-table summary for each track
-    if let Some(moov) = boxes.iter().find(|b| b.typ == "moov") {
-        if let Some(ref children) = moov.children {
-            for trak in children.iter().filter(|b| b.typ == "trak") {
+    if let Some(moov) = boxes.iter().find(|b| b.typ == "moov")
+        && let Some(ref children) = moov.children
+    {
+        for trak in children.iter().filter(|b| b.typ == "trak") {
                 let track_id = trak
                     .children
                     .as_ref()
@@ -136,9 +133,10 @@ fn main() -> anyhow::Result<()> {
                     .and_then(|b| b.children.as_ref())
                     .and_then(|c| c.iter().find(|b| b.typ == "stbl"));
 
-                if let Some(stbl) = stbl {
-                    if let Some(ref stbl_children) = stbl.children {
-                        // Find codec from stsd
+                if let Some(stbl) = stbl
+                    && let Some(ref stbl_children) = stbl.children
+                {
+                    // Find codec from stsd
                         let codec = stbl_children
                             .iter()
                             .find(|b| b.typ == "stsd")
@@ -184,11 +182,10 @@ fn main() -> anyhow::Result<()> {
                             sample_count.map_or("?".into(), |n| n.to_string()),
                             keyframes.map_or("?".into(), |n| n.to_string()),
                         );
-                    }
                 }
             }
-        }
     }
 
     Ok(())
 }
+

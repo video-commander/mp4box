@@ -187,7 +187,10 @@ fn print_box(
 fn display_type(h: &mp4box::boxes::BoxHeader) -> String {
     if &h.typ.0 == b"uuid" {
         let u = h.uuid.unwrap_or([0u8; 16]);
-        format!("uuid:{}", u.iter().map(|b| format!("{:02x}", b)).collect::<String>())
+        format!(
+            "uuid:{}",
+            u.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+        )
     } else {
         let kb = KnownBox::from(h.typ);
         match kb {
@@ -239,26 +242,35 @@ fn format_structured(data: &StructuredData) -> String {
             "timescale={} duration={} language={}",
             d.timescale, d.duration, d.language
         ),
-        StructuredData::HandlerReference(d) => format!(
-            "handler_type={} name={:?}",
-            d.handler_type, d.name
-        ),
+        StructuredData::HandlerReference(d) => {
+            format!("handler_type={} name={:?}", d.handler_type, d.name)
+        }
         StructuredData::SampleDescription(d) => {
             let e = d.entries.first();
             match e {
                 Some(e) => match (e.width, e.height) {
-                    (Some(w), Some(h)) => format!("codec={} {}x{} entries={}", e.codec, w, h, d.entry_count),
+                    (Some(w), Some(h)) => {
+                        format!("codec={} {}x{} entries={}", e.codec, w, h, d.entry_count)
+                    }
                     _ => format!("codec={} entries={}", e.codec, d.entry_count),
                 },
-                None => format!("entries=0"),
+                None => "entries=0".to_string(),
             }
         }
         StructuredData::DecodingTimeToSample(d) => {
-            let summary: Vec<String> = d.entries.iter().take(4)
+            let summary: Vec<String> = d
+                .entries
+                .iter()
+                .take(4)
                 .map(|e| format!("{}×{}", e.sample_count, e.sample_delta))
                 .collect();
             let ellipsis = if d.entry_count > 4 { ", …" } else { "" };
-            format!("entries={} [{}{}]", d.entry_count, summary.join(", "), ellipsis)
+            format!(
+                "entries={} [{}{}]",
+                d.entry_count,
+                summary.join(", "),
+                ellipsis
+            )
         }
         StructuredData::CompositionTimeToSample(d) => format!("entries={}", d.entry_count),
         StructuredData::SampleToChunk(d) => format!("entries={}", d.entry_count),
@@ -274,13 +286,17 @@ fn format_structured(data: &StructuredData) -> String {
         StructuredData::ChunkOffset64(d) => format!("chunks={}", d.entry_count),
         StructuredData::TrackFragmentRun(d) => {
             let mut parts = vec![format!("samples={}", d.sample_count)];
-            if let Some(off) = d.data_offset { parts.push(format!("data_offset={}", off)); }
+            if let Some(off) = d.data_offset {
+                parts.push(format!("data_offset={}", off));
+            }
             let has_dur = d.flags & 0x100 != 0;
             let has_size = d.flags & 0x200 != 0;
-            if has_dur || has_size {
-                if let Some(first) = d.samples.first() {
-                    if let Some(dur) = first.duration { parts.push(format!("first_dur={}", dur)); }
-                    if let Some(sz) = first.size { parts.push(format!("first_size={}", sz)); }
+            if (has_dur || has_size) && let Some(first) = d.samples.first() {
+                if let Some(dur) = first.duration {
+                    parts.push(format!("first_dur={}", dur));
+                }
+                if let Some(sz) = first.size {
+                    parts.push(format!("first_size={}", sz));
                 }
             }
             parts.join(" ")

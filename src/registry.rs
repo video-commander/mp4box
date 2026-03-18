@@ -1132,13 +1132,19 @@ impl BoxDecoder for EsdsDecoder {
         pos += 2;
         let stream_flags = buf[pos];
         pos += 1;
-        if stream_flags & 0x80 != 0 { pos += 2; } // streamDependenceFlag
+        if stream_flags & 0x80 != 0 {
+            pos += 2;
+        } // streamDependenceFlag
         if stream_flags & 0x40 != 0 {
-            if pos >= buf.len() { return Ok(BoxValue::Text("esds: truncated URL".into())); }
+            if pos >= buf.len() {
+                return Ok(BoxValue::Text("esds: truncated URL".into()));
+            }
             let url_len = buf[pos] as usize;
             pos += 1 + url_len;
         }
-        if stream_flags & 0x20 != 0 { pos += 2; } // OCRstreamFlag
+        if stream_flags & 0x20 != 0 {
+            pos += 2;
+        } // OCRstreamFlag
 
         // DecoderConfigDescriptor tag = 0x04
         if pos >= buf.len() || buf[pos] != 0x04 {
@@ -1149,14 +1155,19 @@ impl BoxDecoder for EsdsDecoder {
             return Ok(BoxValue::Text("esds: truncated DecoderConfig".into()));
         }
         if pos >= buf.len() {
-            return Ok(BoxValue::Text("esds: truncated objectTypeIndication".into()));
+            return Ok(BoxValue::Text(
+                "esds: truncated objectTypeIndication".into(),
+            ));
         }
         let object_type = buf[pos];
         pos += 1;
 
         // streamType(1) + bufferSizeDB(3) + maxBitrate(4) + avgBitrate(4)
         if pos + 8 > buf.len() {
-            return Ok(BoxValue::Text(format!("esds: objectType=0x{:02X}", object_type)));
+            return Ok(BoxValue::Text(format!(
+                "esds: objectType=0x{:02X}",
+                object_type
+            )));
         }
         pos += 4; // skip streamType byte + bufferSizeDB
         let max_bitrate = u32::from_be_bytes(buf[pos..pos + 4].try_into().unwrap());
@@ -1169,7 +1180,7 @@ impl BoxDecoder for EsdsDecoder {
 
         let type_name = match object_type {
             0x40 => "AAC",
-            0x66 | 0x67 | 0x68 => "MPEG-4 Audio",
+            0x66..=0x68 => "MPEG-4 Audio",
             0x69 => "MPEG-2 Audio",
             0x6B => "MP3",
             0x20 => "MPEG-4 Visual",
@@ -1211,7 +1222,14 @@ impl BoxDecoder for Av1cDecoder {
         let monochrome = (buf[2] >> 4) & 1;
         Ok(BoxValue::Text(format!(
             "marker={} version={} profile={} level_idx={} tier={} high_bitdepth={} twelve_bit={} monochrome={}",
-            marker, version, seq_profile, seq_level_idx_0, seq_tier_0, high_bitdepth, twelve_bit, monochrome
+            marker,
+            version,
+            seq_profile,
+            seq_level_idx_0,
+            seq_tier_0,
+            high_bitdepth,
+            twelve_bit,
+            monochrome
         )))
     }
 }
@@ -1238,7 +1256,14 @@ impl BoxDecoder for VpccDecoder {
         let matrix = r.read_u8()?;
         Ok(BoxValue::Text(format!(
             "profile={} level={} bit_depth={} chroma={} full_range={} primaries={} transfer={} matrix={}",
-            profile, level, bit_depth, chroma_subsampling, full_range, colour_primaries, transfer, matrix
+            profile,
+            level,
+            bit_depth,
+            chroma_subsampling,
+            full_range,
+            colour_primaries,
+            transfer,
+            matrix
         )))
     }
 }
@@ -1350,8 +1375,7 @@ impl BoxDecoder for DflaDecoder {
         }
         // STREAMINFO starts at buf[4]
         let s = &buf[4..];
-        let sample_rate =
-            ((s[10] as u32) << 12) | ((s[11] as u32) << 4) | ((s[12] as u32) >> 4);
+        let sample_rate = ((s[10] as u32) << 12) | ((s[11] as u32) << 4) | ((s[12] as u32) >> 4);
         let channels = ((s[12] >> 1) & 0x07) + 1;
         let bits_per_sample = (((s[12] & 0x01) << 4) | (s[13] >> 4)) + 1;
         let total_samples = (((s[13] & 0x0F) as u64) << 32)
@@ -1446,7 +1470,14 @@ impl BoxDecoder for MdcvDecoder {
         let min_lum = u32::from_be_bytes(buf[20..24].try_into().unwrap());
         Ok(BoxValue::Text(format!(
             "R({},{}) G({},{}) B({},{}) W({},{}) max_luminance={:.4} min_luminance={:.4} cd/m2",
-            rx, ry, gx, gy, bx, by_, wx, wy,
+            rx,
+            ry,
+            gx,
+            gy,
+            bx,
+            by_,
+            wx,
+            wy,
             max_lum as f64 / 10000.0,
             min_lum as f64 / 10000.0
         )))
