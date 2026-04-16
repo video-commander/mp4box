@@ -1,6 +1,6 @@
 [package]
 name = "mp4box"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 description = "Minimal MP4/ISOBMFF parser with JSON output, box decoding, and UUID support"
 license = "MIT"
