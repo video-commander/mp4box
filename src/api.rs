@@ -363,7 +363,10 @@ pub fn hex_range<R: Read + Seek>(
 /// }
 /// # Ok::<(), anyhow::Error>(())
 /// ```
-pub fn get_itunes_tags<R: Read + Seek>(r: &mut R, size: u64) -> anyhow::Result<HashMap<String, String>> {
+pub fn get_itunes_tags<R: Read + Seek>(
+    r: &mut R,
+    size: u64,
+) -> anyhow::Result<HashMap<String, String>> {
     // moov
     let moov = match find_box_in_range(r, 0, size, b"moov")? {
         Some(h) => h,
@@ -403,7 +406,11 @@ pub fn get_itunes_tags<R: Read + Seek>(r: &mut R, size: u64) -> anyhow::Result<H
 
     while r.stream_position()? + 8 <= ilst_end {
         let tag_hdr = read_box_header(r)?;
-        let tag_end = if tag_hdr.size == 0 { ilst_end } else { tag_hdr.start + tag_hdr.size };
+        let tag_end = if tag_hdr.size == 0 {
+            ilst_end
+        } else {
+            tag_hdr.start + tag_hdr.size
+        };
 
         if let Some(key) = fourcc_to_tag_key(&tag_hdr.typ.0) {
             let tag_content = tag_hdr.start + tag_hdr.header_size;
@@ -488,9 +495,9 @@ fn fourcc_to_tag_key(fourcc: &[u8; 4]) -> Option<&'static str> {
         b"\xa9gen" => Some("genre"),
         b"\xa9cmt" => Some("comment"),
         b"\xa9des" => Some("description"),
-        b"desc"    => Some("description"),
-        b"cprt"    => Some("copyright"),
-        b"aART"    => Some("album_artist"),
+        b"desc" => Some("description"),
+        b"cprt" => Some("copyright"),
+        b"aART" => Some("album_artist"),
         _ => None,
     }
 }
