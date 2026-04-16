@@ -22,6 +22,11 @@ path = "src/bin/mp4info.rs"
 name = "mp4samples"
 path = "src/bin/mp4samples.rs"
 
+[[bin]]
+name = "mp4edit"
+path = "src/bin/mp4edit.rs"
+required-features = ["edit"]
+
 [[example]]
 name = "simple"
 path = "examples/simple.rs"
@@ -29,6 +34,11 @@ path = "examples/simple.rs"
 [[example]]
 name = "boxes"
 path = "examples/boxes.rs"
+
+[[example]]
+name = "edit"
+path = "examples/edit.rs"
+required-features = ["edit"]
 
 [dependencies]
 anyhow = "1.0"
@@ -38,3 +48,6 @@ clap = { version = "4.5", features = ["derive"] }
 hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[features]
+edit = []
