@@ -4,8 +4,9 @@ use crate::{
     registry::{BoxValue, Registry, default_registry},
     util::{hex_dump, read_slice},
 };
-use byteorder::ReadBytesExt;
+use byteorder::{BigEndian, ReadBytesExt};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 
 /// A JSON-serializable representation of a single MP4 box.
@@ -337,4 +338,159 @@ pub fn hex_range<R: Read + Seek>(
         length: to_read, // <-- IMPORTANT: actual bytes read, not max_len
         hex: hex_str,
     })
+}
+
+/// Extract iTunes metadata tags from an MP4 file.
+///
+/// Navigates `moov → udta → meta → ilst` and returns a map of tag name to value
+/// for any recognized iTunes metadata atoms (e.g. `©nam`, `©ART`, `©day`).
+///
+/// Keys returned match ffmpeg's `-metadata` flag names: `title`, `artist`, `album`,
+/// `year`, `genre`, `comment`, `description`, `copyright`, `album_artist`.
+///
+/// Returns an empty map if the file has no iTunes metadata or the box tree is absent.
+///
+/// # Example
+/// ```no_run
+/// use mp4box::get_itunes_tags;
+/// use std::fs::File;
+///
+/// let mut file = File::open("video.mp4")?;
+/// let size = file.metadata()?.len();
+/// let tags = get_itunes_tags(&mut file, size)?;
+/// if let Some(title) = tags.get("title") {
+///     println!("Title: {}", title);
+/// }
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn get_itunes_tags<R: Read + Seek>(r: &mut R, size: u64) -> anyhow::Result<HashMap<String, String>> {
+    // moov
+    let moov = match find_box_in_range(r, 0, size, b"moov")? {
+        Some(h) => h,
+        None => return Ok(HashMap::new()),
+    };
+    let moov_content = moov.start + moov.header_size;
+    let moov_end = moov.start + moov.size;
+
+    // udta
+    let udta = match find_box_in_range(r, moov_content, moov_end, b"udta")? {
+        Some(h) => h,
+        None => return Ok(HashMap::new()),
+    };
+    let udta_content = udta.start + udta.header_size;
+    let udta_end = udta.start + udta.size;
+
+    // meta — a FullBox in practice (ffmpeg always writes version+flags), so skip 4 bytes
+    let meta = match find_box_in_range(r, udta_content, udta_end, b"meta")? {
+        Some(h) => h,
+        None => return Ok(HashMap::new()),
+    };
+    let meta_end = meta.start + meta.size;
+    let meta_content = meta.start + meta.header_size + 4; // skip version (1) + flags (3)
+
+    // ilst
+    let ilst = match find_box_in_range(r, meta_content, meta_end, b"ilst")? {
+        Some(h) => h,
+        None => return Ok(HashMap::new()),
+    };
+    let ilst_content = ilst.start + ilst.header_size;
+    let ilst_end = ilst.start + ilst.size;
+
+    // Each child of ilst is a tag atom (e.g. ©nam, ©ART). Unknown to the registry,
+    // so we iterate them manually and look for their `data` FullBox child.
+    let mut tags = HashMap::new();
+    r.seek(SeekFrom::Start(ilst_content))?;
+
+    while r.stream_position()? + 8 <= ilst_end {
+        let tag_hdr = read_box_header(r)?;
+        let tag_end = if tag_hdr.size == 0 { ilst_end } else { tag_hdr.start + tag_hdr.size };
+
+        if let Some(key) = fourcc_to_tag_key(&tag_hdr.typ.0) {
+            let tag_content = tag_hdr.start + tag_hdr.header_size;
+            if let Some(value) = extract_ilst_data_value(r, tag_content, tag_end)? {
+                tags.insert(key.to_string(), value);
+            }
+        }
+
+        r.seek(SeekFrom::Start(tag_end))?;
+    }
+
+    Ok(tags)
+}
+
+/// Scan boxes from `start` to `end`, returning the first one whose fourcc matches `target`.
+fn find_box_in_range<R: Read + Seek>(
+    r: &mut R,
+    start: u64,
+    end: u64,
+    target: &[u8; 4],
+) -> anyhow::Result<Option<crate::boxes::BoxHeader>> {
+    r.seek(SeekFrom::Start(start))?;
+    while r.stream_position()? + 8 <= end {
+        let h = read_box_header(r)?;
+        let box_end = if h.size == 0 { end } else { h.start + h.size };
+        if &h.typ.0 == target {
+            return Ok(Some(h));
+        }
+        r.seek(SeekFrom::Start(box_end))?;
+    }
+    Ok(None)
+}
+
+/// Within a tag atom (e.g. ©nam), find the `data` FullBox and return its UTF-8 value.
+fn extract_ilst_data_value<R: Read + Seek>(
+    r: &mut R,
+    start: u64,
+    end: u64,
+) -> anyhow::Result<Option<String>> {
+    r.seek(SeekFrom::Start(start))?;
+    while r.stream_position()? + 8 <= end {
+        let h = read_box_header(r)?;
+        let box_end = if h.size == 0 { end } else { h.start + h.size };
+
+        if &h.typ.0 == b"data" {
+            // FullBox header: version (1 byte) + flags (3 bytes) = type indicator
+            let _version = r.read_u8()?;
+            let mut fl = [0u8; 3];
+            r.read_exact(&mut fl)?;
+            let type_code = ((fl[0] as u32) << 16) | ((fl[1] as u32) << 8) | (fl[2] as u32);
+
+            // 4-byte locale field (ignored)
+            r.read_u32::<BigEndian>()?;
+
+            let data_start = r.stream_position()?;
+            let data_len = box_end.saturating_sub(data_start) as usize;
+
+            // type_code 1 = UTF-8
+            if type_code == 1 && data_len > 0 {
+                let mut buf = vec![0u8; data_len];
+                r.read_exact(&mut buf)?;
+                let s = String::from_utf8_lossy(&buf).trim().to_string();
+                if !s.is_empty() {
+                    return Ok(Some(s));
+                }
+            }
+            return Ok(None);
+        }
+
+        r.seek(SeekFrom::Start(box_end))?;
+    }
+    Ok(None)
+}
+
+/// Map iTunes atom fourccs to ffmpeg-compatible metadata key names.
+fn fourcc_to_tag_key(fourcc: &[u8; 4]) -> Option<&'static str> {
+    match fourcc {
+        b"\xa9nam" => Some("title"),
+        b"\xa9ART" => Some("artist"),
+        b"\xa9alb" => Some("album"),
+        b"\xa9day" => Some("year"),
+        b"\xa9gen" => Some("genre"),
+        b"\xa9cmt" => Some("comment"),
+        b"\xa9des" => Some("description"),
+        b"desc"    => Some("description"),
+        b"cprt"    => Some("copyright"),
+        b"aART"    => Some("album_artist"),
+        _ => None,
+    }
 }
