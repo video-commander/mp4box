@@ -79,6 +79,8 @@
 
 pub mod api;
 pub mod boxes;
+#[cfg(feature = "edit")]
+pub mod edit;
 pub mod known_boxes;
 pub mod parser;
 pub mod registry;
