@@ -6,6 +6,12 @@ description = "Minimal MP4/ISOBMFF parser with JSON output, box decoding, and UU
 license = "MIT"
 repository = "https://github.com/alfg/mp4box"
 
+[features]
+default = ["edit"]
+# Non-destructive box editing (Editor, mp4edit). No extra dependencies;
+# opt out with default-features = false for a parse-only build.
+edit = []
+
 [lib]
 name = "mp4box"
 path = "src/lib.rs"
@@ -22,6 +28,11 @@ path = "src/bin/mp4info.rs"
 name = "mp4samples"
 path = "src/bin/mp4samples.rs"
 
+[[bin]]
+name = "mp4edit"
+path = "src/bin/mp4edit.rs"
+required-features = ["edit"]
+
 [[example]]
 name = "simple"
 path = "examples/simple.rs"
@@ -29,6 +40,11 @@ path = "examples/simple.rs"
 [[example]]
 name = "boxes"
 path = "examples/boxes.rs"
+
+[[example]]
+name = "edit"
+path = "examples/edit.rs"
+required-features = ["edit"]
 
 [dependencies]
 anyhow = "1.0"
