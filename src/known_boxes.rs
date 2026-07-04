@@ -373,7 +373,8 @@ impl From<FourCC> for KnownBox {
             b"mp4a" => KnownBox::Mp4a,
             b"ac-3" => KnownBox::Ac3,
             b"ec-3" => KnownBox::Ec3,
-            b"opus" => KnownBox::Opus,
+            // The Opus-in-ISOBMFF spec uses "Opus"; accept lowercase too.
+            b"Opus" | b"opus" => KnownBox::Opus,
             b"samr" => KnownBox::Samr,
             b"sawb" => KnownBox::Sawb,
             b"alac" => KnownBox::Alac,
@@ -435,7 +436,11 @@ impl From<FourCC> for KnownBox {
 }
 
 impl KnownBox {
-    /// Returns `true` if this box type is a container (i.e. can have children).
+    /// Returns `true` if this box type is a plain container (i.e. its payload
+    /// is just child boxes, with no version/flags header).
+    ///
+    /// FullBox containers like `meta` are classified by
+    /// [`KnownBox::is_full_container`] instead.
     pub fn is_container(&self) -> bool {
         matches!(
             self,
@@ -446,25 +451,34 @@ impl KnownBox {
                 | KnownBox::Stbl
                 | KnownBox::Edts
                 | KnownBox::Udta
-                | KnownBox::Meta
                 | KnownBox::Moof
                 | KnownBox::Mvex
                 | KnownBox::Mfra
                 | KnownBox::Meco
                 | KnownBox::Traf
+                | KnownBox::Dinf
+                | KnownBox::Tref
                 | KnownBox::Sinf
+                | KnownBox::Schi
                 | KnownBox::Iprp
-                | KnownBox::Iref
                 | KnownBox::Ipco
-                | KnownBox::Ipma
                 | KnownBox::Ilst
                 | KnownBox::Ludt
                 | KnownBox::Gmhd
                 | KnownBox::Ipro
                 | KnownBox::Sv3d
                 | KnownBox::Proj
-                | KnownBox::Trep
                 | KnownBox::Wave
+        )
+    }
+
+    /// Returns `true` if this box is a FullBox that contains child boxes:
+    /// version/flags come first, followed by children (possibly after
+    /// additional fixed fields, as in `stsd`).
+    pub fn is_full_container(&self) -> bool {
+        matches!(
+            self,
+            KnownBox::Meta | KnownBox::Iref | KnownBox::Trep | KnownBox::Stsd
         )
     }
 
@@ -478,6 +492,7 @@ impl KnownBox {
                 | KnownBox::Hdlr
                 | KnownBox::Vmhd
                 | KnownBox::Smhd
+                | KnownBox::Hmhd
                 | KnownBox::Nmhd
                 | KnownBox::Sthd
                 | KnownBox::Dref
@@ -511,9 +526,19 @@ impl KnownBox {
                 | KnownBox::Infe
                 | KnownBox::Pitm
                 | KnownBox::Pssh
-                | KnownBox::Schi
+                | KnownBox::Schm
+                | KnownBox::Tenc
+                | KnownBox::Senc
                 | KnownBox::Saio
                 | KnownBox::Saiz
+                | KnownBox::Ipma
+                | KnownBox::Emsg
+                | KnownBox::Prft
+                | KnownBox::Ssix
+                | KnownBox::Mfro
+                | KnownBox::Cprt
+                | KnownBox::Cslg
+                | KnownBox::Chan
                 | KnownBox::Esds
                 | KnownBox::Vpcc
                 | KnownBox::Dfla

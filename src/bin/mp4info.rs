@@ -192,7 +192,7 @@ fn parse_trak(trak: &Box, index: usize, info: &mut MediaInfo) {
             &mdhd.structured_data
         {
             ti.timescale = Some(mdhd_data.timescale);
-            ti.duration_ticks = Some(mdhd_data.duration as u64);
+            ti.duration_ticks = Some(mdhd_data.duration);
             ti.duration_seconds = Some(mdhd_data.duration as f64 / mdhd_data.timescale as f64);
             ti.language = Some(mdhd_data.language.clone());
         }

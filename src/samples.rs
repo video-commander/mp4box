@@ -304,7 +304,8 @@ pub fn extract_track_samples<R: Read + Seek>(
     let sample_tables = extract_sample_tables(stbl_box)?;
 
     // Build sample information from the tables
-    let samples = build_sample_info(&sample_tables, timescale, reader)?;
+    let _ = reader;
+    let samples = build_sample_info(&sample_tables, timescale)?;
     let sample_count = samples.len() as u32;
 
     Ok(Some(TrackSamples {
@@ -354,7 +355,7 @@ fn find_media_info(trak_box: &crate::Box) -> anyhow::Result<(String, u32, u64)> 
                             &mdia_child.structured_data
                         {
                             timescale = mdhd_data.timescale;
-                            duration = mdhd_data.duration as u64;
+                            duration = mdhd_data.duration;
                         }
                     }
                     if mdia_child.typ == "hdlr" {
@@ -464,228 +465,172 @@ fn extract_sample_tables(stbl_box: &crate::Box) -> anyhow::Result<SampleTables> 
     Ok(tables)
 }
 
-fn build_sample_info<R: Read + Seek>(
-    tables: &SampleTables,
-    timescale: u32,
-    _reader: &mut R,
-) -> anyhow::Result<Vec<SampleInfo>> {
-    let mut samples = Vec::new();
-
-    // Get sample count from stsz
-    let sample_count = if let Some(stsz) = &tables.stsz {
-        stsz.sample_count
-    } else {
-        return Ok(samples);
-    };
-
-    // Calculate timing information from stts
-    let mut current_dts = 0u64;
-    let default_duration = if timescale > 0 { timescale / 24 } else { 1000 };
-
-    // Build samples using the available tables
-    for i in 0..sample_count {
-        // Get duration from stts or use default
-        let duration = if let Some(stts) = &tables.stts {
-            get_sample_duration_from_stts(stts, i).unwrap_or(default_duration)
-        } else {
-            default_duration
-        };
-
-        // Calculate PTS from DTS + composition offset
-        let composition_offset = if let Some(ctts) = &tables.ctts {
-            get_composition_offset_from_ctts(ctts, i).unwrap_or(0)
-        } else {
-            0
-        };
-
-        let pts = current_dts.saturating_add_signed(composition_offset as i64);
-
-        let sample = SampleInfo {
-            index: i,
-            dts: current_dts,
-            pts,
-            start_time: pts as f64 / timescale as f64,
-            duration,
-            rendered_offset: composition_offset as i64,
-            file_offset: get_sample_file_offset(tables, i),
-            size: get_sample_size(&tables.stsz, i),
-            is_sync: is_sync_sample(&tables.stss, i + 1), // stss uses 1-based indexing
-        };
-
-        current_dts += duration as u64;
-        samples.push(sample);
-    }
-
-    Ok(samples)
+/// Sequential cursor over run-length encoded table entries (stts/ctts).
+/// Yields one value per sample in a single forward pass.
+struct RunCursor<'a, T> {
+    entries: &'a [T],
+    idx: usize,
+    used: u32,
 }
 
-fn get_sample_size(stsz: &Option<crate::registry::StszData>, index: u32) -> u32 {
-    if let Some(stsz) = stsz {
+impl<'a, T> RunCursor<'a, T> {
+    fn new(entries: &'a [T]) -> Self {
+        Self {
+            entries,
+            idx: 0,
+            used: 0,
+        }
+    }
+
+    /// Advance one sample; returns the entry covering it, or `None` once the
+    /// table is exhausted.
+    fn next(&mut self, count_of: impl Fn(&T) -> u32) -> Option<&'a T> {
+        while let Some(e) = self.entries.get(self.idx) {
+            if self.used < count_of(e) {
+                self.used += 1;
+                return Some(e);
+            }
+            self.idx += 1;
+            self.used = 0;
+        }
+        None
+    }
+}
+
+fn build_sample_info(tables: &SampleTables, timescale: u32) -> anyhow::Result<Vec<SampleInfo>> {
+    // Sample count and sizes come from stsz (or stz2, which decodes to the
+    // same shape).
+    let Some(stsz) = &tables.stsz else {
+        return Ok(Vec::new());
+    };
+    let sample_count = stsz.sample_count;
+
+    let size_of = |i: u32| -> u32 {
         if stsz.sample_size > 0 {
-            // All samples have the same size
             stsz.sample_size
-        } else if let Some(size) = stsz.sample_sizes.get(index as usize) {
-            *size
         } else {
-            0
+            stsz.sample_sizes.get(i as usize).copied().unwrap_or(0)
         }
-    } else {
-        0
-    }
-}
-
-fn is_sync_sample(stss: &Option<crate::registry::StssData>, sample_number: u32) -> bool {
-    if let Some(stss) = stss {
-        stss.sample_numbers.contains(&sample_number)
-    } else {
-        // If no stss box, all samples are sync samples
-        true
-    }
-}
-
-// Helper functions for timing calculations
-fn get_sample_duration_from_stts(
-    stts: &crate::registry::SttsData,
-    sample_index: u32,
-) -> Option<u32> {
-    let mut current_sample = 0;
-
-    for entry in &stts.entries {
-        if sample_index < current_sample + entry.sample_count {
-            return Some(entry.sample_delta);
-        }
-        current_sample += entry.sample_count;
-    }
-
-    // If not found, use the last entry's duration
-    stts.entries.last().map(|entry| entry.sample_delta)
-}
-
-fn get_composition_offset_from_ctts(
-    ctts: &crate::registry::CttsData,
-    sample_index: u32,
-) -> Option<i32> {
-    let mut current_sample = 0;
-
-    for entry in &ctts.entries {
-        if sample_index < current_sample + entry.sample_count {
-            return Some(entry.sample_offset);
-        }
-        current_sample += entry.sample_count;
-    }
-
-    // If not found, no composition offset
-    Some(0)
-}
-
-fn get_sample_file_offset(tables: &SampleTables, sample_index: u32) -> u64 {
-    // Calculate actual file offset using stsc + stco/co64 + stsz
-
-    let stsc = match &tables.stsc {
-        Some(data) => data,
-        None => return 0, // No chunk mapping available
     };
 
-    let stsz = match &tables.stsz {
-        Some(data) => data,
-        None => return 0, // No sample sizes available
+    // ---- File offsets: walk chunks once via stsc + stco/co64 ----
+    let chunk_offset_at = |index: usize| -> Option<u64> {
+        if let Some(co64) = &tables.co64 {
+            co64.chunk_offsets.get(index).copied()
+        } else if let Some(stco) = &tables.stco {
+            stco.chunk_offsets.get(index).copied().map(u64::from)
+        } else {
+            None
+        }
     };
-
-    // Get chunk offsets reference (prefer 64-bit if available)
-    let (chunk_offsets_64, chunk_offsets_32) = if let Some(co64) = &tables.co64 {
-        (Some(&co64.chunk_offsets), None)
+    let chunk_count = if let Some(co64) = &tables.co64 {
+        co64.chunk_offsets.len()
     } else if let Some(stco) = &tables.stco {
-        (None, Some(&stco.chunk_offsets))
-    } else {
-        return 0; // No chunk offsets available
-    };
-
-    // Helper function to get chunk offset by index
-    let get_chunk_offset = |index: usize| -> u64 {
-        if let Some(offsets_64) = chunk_offsets_64 {
-            offsets_64.get(index).copied().unwrap_or(0)
-        } else if let Some(offsets_32) = chunk_offsets_32 {
-            offsets_32.get(index).copied().unwrap_or(0) as u64
-        } else {
-            0
-        }
-    };
-
-    // Get chunk count
-    let chunk_count = if let Some(offsets_64) = chunk_offsets_64 {
-        offsets_64.len()
-    } else if let Some(offsets_32) = chunk_offsets_32 {
-        offsets_32.len()
+        stco.chunk_offsets.len()
     } else {
         0
     };
 
-    // Find which chunk contains this sample (1-based sample indexing in MP4)
-    let target_sample = sample_index + 1;
-    let mut current_sample = 1u32;
-    let mut chunk_index = 0usize;
-    let mut samples_per_chunk = 0u32;
-    let mut sample_offset_in_range = 0u32;
-    let mut chunk_offset_in_range = 0u32;
+    // Samples not covered by the tables keep offset 0 (unknown).
+    let mut file_offsets = vec![0u64; sample_count as usize];
+    if let Some(stsc) = &tables.stsc {
+        let mut sample_idx = 0u32;
+        'chunks: for (i, entry) in stsc.entries.iter().enumerate() {
+            // Chunk range covered by this stsc entry (1-based first_chunk).
+            let first = (entry.first_chunk.max(1) - 1) as usize;
+            let next_first = stsc
+                .entries
+                .get(i + 1)
+                .map(|e| (e.first_chunk.max(1) - 1) as usize)
+                .unwrap_or(chunk_count);
 
-    for (i, entry) in stsc.entries.iter().enumerate() {
-        // Calculate how many samples are covered by previous chunks with this entry's configuration
-        let next_first_chunk = if i + 1 < stsc.entries.len() {
-            stsc.entries[i + 1].first_chunk
-        } else {
-            chunk_count as u32 + 1 // Beyond last chunk
-        };
-
-        samples_per_chunk = entry.samples_per_chunk;
-        let chunks_with_this_config = next_first_chunk - entry.first_chunk;
-        let samples_in_this_range =
-            (chunks_with_this_config as u64).saturating_mul(samples_per_chunk as u64);
-
-        if (current_sample as u64) + samples_in_this_range > target_sample as u64 {
-            // Target sample is in this range
-            // First, find the chunk containing the sample within this range
-            sample_offset_in_range = target_sample - current_sample;
-            chunk_offset_in_range = sample_offset_in_range / samples_per_chunk;
-            chunk_index = (entry.first_chunk - 1) as usize + chunk_offset_in_range as usize;
-            break;
-        }
-
-        current_sample =
-            (current_sample as u64 + samples_in_this_range).min(u32::MAX as u64) as u32;
-    }
-
-    if chunk_index >= chunk_count {
-        return 0; // Chunk index out of bounds
-    }
-
-    // Get the base offset of the chunk
-    let chunk_offset = get_chunk_offset(chunk_index);
-
-    // Calculate which sample within the chunk we want
-    // Values were already calculated when breaking out of the loop
-    let sample_in_chunk = (sample_offset_in_range % samples_per_chunk) as usize;
-
-    // Sum up the sizes of preceding samples in this chunk to get the offset within chunk
-    let mut offset_in_chunk = 0u64;
-    // The chunk_start_sample is the first sample in this specific chunk (0-based for array indexing)
-    let chunk_start_sample =
-        (current_sample - 1 + chunk_offset_in_range * samples_per_chunk) as usize;
-
-    // Handle both fixed and variable sample sizes
-    if stsz.sample_size > 0 {
-        // Fixed sample size for all samples
-        offset_in_chunk = sample_in_chunk as u64 * stsz.sample_size as u64;
-    } else if !stsz.sample_sizes.is_empty() {
-        // Variable sample sizes
-        for i in 0..sample_in_chunk {
-            let sample_idx = chunk_start_sample + i;
-            if sample_idx < stsz.sample_sizes.len() {
-                offset_in_chunk += stsz.sample_sizes[sample_idx] as u64;
+            for chunk in first..next_first.min(chunk_count) {
+                let Some(base) = chunk_offset_at(chunk) else {
+                    break 'chunks;
+                };
+                let mut offset = base;
+                for _ in 0..entry.samples_per_chunk {
+                    if sample_idx >= sample_count {
+                        break 'chunks;
+                    }
+                    file_offsets[sample_idx as usize] = offset;
+                    offset += size_of(sample_idx) as u64;
+                    sample_idx += 1;
+                }
             }
         }
     }
 
-    chunk_offset + offset_in_chunk
+    // ---- Timing and sync tables, one forward pass each ----
+    let empty_stts = Vec::new();
+    let mut stts_cursor = RunCursor::new(
+        tables
+            .stts
+            .as_ref()
+            .map(|t| t.entries.as_slice())
+            .unwrap_or(&empty_stts),
+    );
+    let empty_ctts = Vec::new();
+    let mut ctts_cursor = RunCursor::new(
+        tables
+            .ctts
+            .as_ref()
+            .map(|t| t.entries.as_slice())
+            .unwrap_or(&empty_ctts),
+    );
+    let stss_set: Option<std::collections::HashSet<u32>> = tables
+        .stss
+        .as_ref()
+        .map(|s| s.sample_numbers.iter().copied().collect());
+
+    // If stts runs out before sample_count (non-compliant but seen in the
+    // wild), keep using its last delta; a missing/empty table yields 0
+    // rather than a fabricated frame rate.
+    let last_stts_delta = tables
+        .stts
+        .as_ref()
+        .and_then(|t| t.entries.last())
+        .map(|e| e.sample_delta)
+        .unwrap_or(0);
+
+    let mut samples = Vec::with_capacity(sample_count as usize);
+    let mut current_dts = 0u64;
+
+    for i in 0..sample_count {
+        let duration = stts_cursor
+            .next(|e| e.sample_count)
+            .map(|e| e.sample_delta)
+            .unwrap_or(last_stts_delta);
+
+        // A ctts that doesn't cover this sample means no composition offset.
+        let composition_offset = ctts_cursor
+            .next(|e| e.sample_count)
+            .map(|e| e.sample_offset)
+            .unwrap_or(0);
+
+        let pts = current_dts.saturating_add_signed(composition_offset as i64);
+
+        samples.push(SampleInfo {
+            index: i,
+            dts: current_dts,
+            pts,
+            start_time: if timescale > 0 {
+                pts as f64 / timescale as f64
+            } else {
+                0.0
+            },
+            duration,
+            rendered_offset: composition_offset as i64,
+            file_offset: file_offsets[i as usize],
+            size: size_of(i),
+            // stss uses 1-based sample numbers; no stss box = all sync.
+            is_sync: stss_set.as_ref().is_none_or(|set| set.contains(&(i + 1))),
+        });
+
+        current_dts += duration as u64;
+    }
+
+    Ok(samples)
 }
 
 #[cfg(test)]

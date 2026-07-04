@@ -60,6 +60,16 @@ pub struct BoxHeader {
 #[derive(Debug)]
 pub enum NodeKind {
     Container(Vec<BoxRef>),
+    /// A FullBox that also contains child boxes (e.g. `meta`, `iref`, `stsd`).
+    /// `data_offset`/`data_len` cover the payload after version/flags, which
+    /// may include non-box fields (e.g. stsd's entry_count) before the children.
+    FullContainer {
+        version: u8,
+        flags: u32,
+        data_offset: u64,
+        data_len: u64,
+        children: Vec<BoxRef>,
+    },
     FullBox {
         version: u8,
         flags: u32,
