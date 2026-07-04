@@ -1,10 +1,10 @@
+use crate::util::ReadExt;
 use crate::{
     boxes::{BoxRef, NodeKind},
     parser::read_box_header,
     registry::{BoxValue, Registry, default_registry},
     util::{hex_dump, read_slice},
 };
-use byteorder::{BigEndian, ReadBytesExt};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -522,7 +522,7 @@ fn extract_ilst_data_value<R: Read + Seek>(
             let type_code = ((fl[0] as u32) << 16) | ((fl[1] as u32) << 8) | (fl[2] as u32);
 
             // 4-byte locale field (ignored)
-            r.read_u32::<BigEndian>()?;
+            r.read_u32_be()?;
 
             let data_start = r.stream_position()?;
             let data_len = box_end.saturating_sub(data_start) as usize;

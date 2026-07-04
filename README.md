@@ -21,11 +21,17 @@ mp4box = "0.9.0"
 anyhow = "1.0"  # For error handling in examples
 ```
 
-Box editing is behind the `edit` feature (enabled by default). For a
-parse-only build:
+The library core depends only on `anyhow` and `serde`. Two default-on
+features add the rest:
+
+- `edit` — non-destructive box editing (no extra dependencies)
+- `cli` — the `mp4dump`/`mp4info`/`mp4samples`/`mp4edit` binaries
+  (pulls in `clap` and `serde_json`)
+
+For the lightest library-only build:
 
 ```toml
-mp4box = { version = "0.9.0", default-features = false }
+mp4box = { version = "0.9.0", default-features = false, features = ["edit"] }
 ```
 
 ---

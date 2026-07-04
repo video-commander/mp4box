@@ -1,27 +1,49 @@
 use crate::boxes::{BoxHeader, BoxRef, FourCC, NodeKind};
 use crate::known_boxes::KnownBox;
-use byteorder::{BigEndian, ReadBytesExt};
+use crate::util::ReadExt;
 use std::io::{Read, Seek, SeekFrom};
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug)]
 pub enum ParseError {
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("invalid box size")]
+    Io(std::io::Error),
     InvalidSize,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::Io(e) => write!(f, "io: {}", e),
+            ParseError::InvalidSize => write!(f, "invalid box size"),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ParseError::Io(e) => Some(e),
+            ParseError::InvalidSize => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for ParseError {
+    fn from(e: std::io::Error) -> Self {
+        ParseError::Io(e)
+    }
 }
 
 pub type Result<T> = std::result::Result<T, ParseError>;
 
 pub fn read_box_header<R: Read + Seek>(r: &mut R) -> Result<BoxHeader> {
     let start = r.stream_position()?;
-    let size32 = r.read_u32::<BigEndian>()?;
+    let size32 = r.read_u32_be()?;
     let mut typ = [0u8; 4];
     r.read_exact(&mut typ)?;
     let mut size = size32 as u64;
 
     if size32 == 1 {
-        size = r.read_u64::<BigEndian>()?;
+        size = r.read_u64_be()?;
     }
 
     let mut uuid = None;
@@ -295,7 +317,7 @@ fn meta_is_quicktime_style<R: Read + Seek>(
         return Ok(false);
     }
     r.seek(SeekFrom::Start(content_start))?;
-    let size = r.read_u32::<BigEndian>()? as u64;
+    let size = r.read_u32_be()? as u64;
     let mut typ = [0u8; 4];
     r.read_exact(&mut typ)?;
     Ok(size >= 8 && content_start + size <= box_end && fourcc_is_printable(&FourCC(typ)))
@@ -322,7 +344,7 @@ fn parse_stsd<R: Read + Seek>(
     let (version, flags) = read_version_flags(r)?;
     let data_offset = r.stream_position()?;
     let data_len = box_end.saturating_sub(data_offset);
-    let _entry_count = r.read_u32::<BigEndian>()?;
+    let _entry_count = r.read_u32_be()?;
 
     let mut children = Vec::new();
     while r.stream_position()? + 8 <= box_end {
@@ -405,7 +427,7 @@ fn sample_entry_fixed_len<R: Read + Seek>(
                 return Ok(None);
             }
             r.seek(SeekFrom::Start(content_start + 8))?;
-            let qt_version = r.read_u16::<BigEndian>()?;
+            let qt_version = r.read_u16_be()?;
             Ok(Some(match qt_version {
                 1 => AUDIO_V1,
                 2 => AUDIO_V2,

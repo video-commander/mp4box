@@ -466,3 +466,113 @@ fn real_file_ground_truth() {
     assert!(tracks[1].samples[0].file_offset > 0);
     assert!(tracks[1].samples[0].file_offset < size);
 }
+
+// ---------- DRM / DASH boxes ----------
+
+const WIDEVINE_ID: [u8; 16] = [
+    0xED, 0xEF, 0x8B, 0xA9, 0x79, 0xD6, 0x4A, 0xCE, 0xA3, 0xC8, 0x27, 0xDC, 0xD5, 0x1D, 0x21, 0xED,
+];
+
+#[test]
+fn pssh_v0_recognizes_widevine() {
+    let mut p = Vec::new();
+    p.extend_from_slice(&WIDEVINE_ID);
+    p.extend_from_slice(&5u32.to_be_bytes()); // data_size
+    p.extend_from_slice(&[1, 2, 3, 4, 5]);
+    let data = full_box(b"pssh", 0, 0, &p);
+    let boxes = parse(&data);
+    let pssh = find(&boxes, "pssh");
+    let Some(StructuredData::ProtectionSystemHeader(d)) = &pssh.structured_data else {
+        panic!("expected structured pssh");
+    };
+    assert_eq!(d.system_id, "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed");
+    assert_eq!(d.system_name.as_deref(), Some("Widevine"));
+    assert!(d.key_ids.is_empty());
+    assert_eq!(d.data_size, 5);
+    assert!(pssh.decoded.as_deref().unwrap().contains("Widevine"));
+}
+
+#[test]
+fn pssh_v1_lists_key_ids() {
+    let mut p = Vec::new();
+    p.extend_from_slice(&WIDEVINE_ID);
+    p.extend_from_slice(&2u32.to_be_bytes()); // KID_count
+    p.extend_from_slice(&[0xAA; 16]);
+    p.extend_from_slice(&[0xBB; 16]);
+    p.extend_from_slice(&0u32.to_be_bytes()); // data_size
+    let data = full_box(b"pssh", 1, 0, &p);
+    let boxes = parse(&data);
+    let Some(StructuredData::ProtectionSystemHeader(d)) = &find(&boxes, "pssh").structured_data
+    else {
+        panic!("expected structured pssh");
+    };
+    assert_eq!(d.key_ids.len(), 2);
+    assert_eq!(d.key_ids[0], "aa".repeat(16));
+    assert_eq!(d.key_ids[1], "bb".repeat(16));
+}
+
+#[test]
+fn tenc_v1_pattern_encryption() {
+    // reserved, pattern (crypt=1, skip=9), is_protected, iv_size=0
+    let mut p = vec![0u8, 0x19, 1, 0];
+    p.extend_from_slice(&[0xCC; 16]); // default_KID
+    p.push(16); // constant IV size
+    p.extend_from_slice(&[0xDD; 16]);
+    let data = full_box(b"tenc", 1, 0, &p);
+    let boxes = parse(&data);
+    let Some(StructuredData::TrackEncryption(d)) = &find(&boxes, "tenc").structured_data else {
+        panic!("expected structured tenc");
+    };
+    assert!(d.default_is_protected);
+    assert_eq!(d.default_crypt_byte_block, 1);
+    assert_eq!(d.default_skip_byte_block, 9);
+    assert_eq!(d.default_per_sample_iv_size, 0);
+    assert_eq!(d.default_kid, "cc".repeat(16));
+    assert_eq!(
+        d.default_constant_iv.as_deref(),
+        Some("dd".repeat(16).as_str())
+    );
+}
+
+#[test]
+fn emsg_v0_and_v1_decode() {
+    // v0: scheme/value strings first, then delta timing.
+    let mut p = Vec::new();
+    p.extend_from_slice(b"urn:scte:scte35:2013:xml\0");
+    p.extend_from_slice(b"1\0");
+    p.extend_from_slice(&90000u32.to_be_bytes()); // timescale
+    p.extend_from_slice(&180000u32.to_be_bytes()); // presentation_time_delta
+    p.extend_from_slice(&270000u32.to_be_bytes()); // event_duration
+    p.extend_from_slice(&7u32.to_be_bytes()); // id
+    p.extend_from_slice(b"<payload/>");
+    let data = full_box(b"emsg", 0, 0, &p);
+    let boxes = parse(&data);
+    let Some(StructuredData::EventMessage(d)) = &find(&boxes, "emsg").structured_data else {
+        panic!("expected structured emsg");
+    };
+    assert_eq!(d.scheme_id_uri, "urn:scte:scte35:2013:xml");
+    assert_eq!(d.value, "1");
+    assert_eq!(d.timescale, 90000);
+    assert_eq!(d.presentation_time_delta, Some(180000));
+    assert_eq!(d.presentation_time, None);
+    assert_eq!(d.id, 7);
+    assert_eq!(d.message_size, 10);
+
+    // v1: absolute 64-bit presentation time first, strings after.
+    let mut p = Vec::new();
+    p.extend_from_slice(&90000u32.to_be_bytes());
+    p.extend_from_slice(&8_589_934_592u64.to_be_bytes()); // > u32::MAX
+    p.extend_from_slice(&0u32.to_be_bytes());
+    p.extend_from_slice(&9u32.to_be_bytes());
+    p.extend_from_slice(b"urn:example\0");
+    p.extend_from_slice(b"\0");
+    let data = full_box(b"emsg", 1, 0, &p);
+    let boxes = parse(&data);
+    let Some(StructuredData::EventMessage(d)) = &find(&boxes, "emsg").structured_data else {
+        panic!("expected structured emsg");
+    };
+    assert_eq!(d.scheme_id_uri, "urn:example");
+    assert_eq!(d.presentation_time, Some(8_589_934_592));
+    assert_eq!(d.presentation_time_delta, None);
+    assert_eq!(d.message_size, 0);
+}

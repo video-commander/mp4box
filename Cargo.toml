@@ -7,10 +7,13 @@ license = "MIT"
 repository = "https://github.com/alfg/mp4box"
 
 [features]
-default = ["edit"]
-# Non-destructive box editing (Editor, mp4edit). No extra dependencies;
-# opt out with default-features = false for a parse-only build.
+default = ["edit", "cli"]
+# Non-destructive box editing (Editor, mp4edit). No extra dependencies.
 edit = []
+# Command-line tools (mp4dump, mp4info, mp4samples, mp4edit); pulls in
+# clap and serde_json. Library consumers can opt out:
+#   mp4box = { version = "...", default-features = false, features = ["edit"] }
+cli = ["dep:clap", "dep:serde_json"]
 
 [lib]
 name = "mp4box"
@@ -19,19 +22,22 @@ path = "src/lib.rs"
 [[bin]]
 name = "mp4dump"
 path = "src/bin/mp4dump.rs"
+required-features = ["cli"]
 
 [[bin]]
 name = "mp4info"
 path = "src/bin/mp4info.rs"
+required-features = ["cli"]
 
 [[bin]]
 name = "mp4samples"
 path = "src/bin/mp4samples.rs"
+required-features = ["cli"]
 
 [[bin]]
 name = "mp4edit"
 path = "src/bin/mp4edit.rs"
-required-features = ["edit"]
+required-features = ["cli", "edit"]
 
 [[example]]
 name = "simple"
@@ -48,9 +54,9 @@ required-features = ["edit"]
 
 [dependencies]
 anyhow = "1.0"
-byteorder = "1.5"
-thiserror = "2.0"
-clap = { version = "4.5", features = ["derive"] }
-hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
+
+[dev-dependencies]
 serde_json = "1.0"
