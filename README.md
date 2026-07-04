@@ -77,6 +77,8 @@ fn main() -> anyhow::Result<()> {
 - **Non-destructive editing** (`edit` feature) — remove/insert/replace boxes,
   patch header fields, set tags; box sizes and `stco`/`co64` chunk offsets
   are fixed up automatically
+- **Tolerant parsing** — `get_boxes_tolerant` recovers from malformed boxes,
+  returning the partial tree plus located issues instead of an error
 - **Custom decoders** — attach your own parser for any 4CC or UUID
 - **Frontend-friendly JSON** — works perfectly in Tauri or WebView apps
 - **CLI tools** — `mp4dump`, `mp4info`, `mp4samples`, `mp4edit`
@@ -222,6 +224,21 @@ Filter a subtree, emit JSON, or dump raw payload bytes:
 $ mp4dump input.mp4 --filter 'moov/trak[0]/mdia/minf/stbl'
 $ mp4dump input.mp4 --decode --json
 $ mp4dump input.mp4 --raw stsd --bytes 256
+```
+
+Damaged files are handled gracefully by default: parsing recovers past
+malformed boxes, prints the partial tree, reports what was wrong and where
+on stderr, and exits with code 2. Use `--strict` to fail on the first
+malformed box instead.
+
+```bash
+$ mp4dump damaged.mp4
+...
+2 parse issue(s):
+  0x294b4a2: box 'mdia' declares size 284285 which overruns its container by 84287 bytes; clamped
+  0x2960979: box 'stsz' declares size 126484 which overruns its container by 13741 bytes; clamped
+$ echo $?
+2
 ```
 
 ### `mp4info` — media summary

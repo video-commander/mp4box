@@ -71,6 +71,43 @@ pub fn get_boxes<R: Read + Seek>(r: &mut R, size: u64, decode: bool) -> anyhow::
     get_boxes_with_registry(r, size, decode, &default_registry())
 }
 
+/// Like [`get_boxes`], but recovers from malformed boxes instead of failing:
+/// returns the tree that could be parsed together with a list of
+/// [`ParseIssue`]s (offset + description) for everything that couldn't.
+///
+/// A clean file returns an empty issue list and the same tree as
+/// [`get_boxes`]. Damage is contained to the enclosing container: a corrupt
+/// child abandons the rest of *its* container while siblings and ancestors
+/// keep parsing, and a box whose interior fails to parse is kept as an
+/// opaque leaf.
+///
+/// ```no_run
+/// use mp4box::get_boxes_tolerant;
+/// use std::fs::File;
+///
+/// let mut file = File::open("damaged.mp4")?;
+/// let size = file.metadata()?.len();
+/// let (boxes, issues) = get_boxes_tolerant(&mut file, size, true)?;
+/// println!("parsed {} top-level boxes", boxes.len());
+/// for issue in &issues {
+///     eprintln!("warning: {}", issue);
+/// }
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn get_boxes_tolerant<R: Read + Seek>(
+    r: &mut R,
+    size: u64,
+    decode: bool,
+) -> anyhow::Result<(Vec<Box>, Vec<crate::parser::ParseIssue>)> {
+    let (boxes, issues) = crate::parser::parse_boxes_tolerant(r, 0, size)?;
+    let reg = default_registry();
+    let json_boxes = boxes
+        .iter()
+        .map(|b| build_box(r, b, decode, &reg))
+        .collect();
+    Ok((json_boxes, issues))
+}
+
 /// Like [`get_boxes`], but decodes with a caller-supplied [`Registry`]
 /// instead of the default one.
 ///

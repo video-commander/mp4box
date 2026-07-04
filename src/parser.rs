@@ -54,21 +54,134 @@ pub fn read_box_header<R: Read + Seek>(r: &mut R) -> Result<BoxHeader> {
 /// Parse all boxes in the byte range `[start, end)`.
 ///
 /// This is the entry point for parsing a whole file (`start = 0`,
-/// `end = file length`) or any sub-range.
+/// `end = file length`) or any sub-range. The first malformed box aborts
+/// the parse with an error; see [`parse_boxes_tolerant`] for the recovering
+/// variant.
 pub fn parse_boxes<R: Read + Seek>(r: &mut R, start: u64, end: u64) -> Result<Vec<BoxRef>> {
     r.seek(SeekFrom::Start(start))?;
     parse_children(r, end)
 }
 
+/// A problem encountered while parsing in tolerant mode.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ParseIssue {
+    /// File offset where the problem was detected.
+    pub offset: u64,
+    /// Human-readable description.
+    pub message: String,
+}
+
+impl std::fmt::Display for ParseIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#x}: {}", self.offset, self.message)
+    }
+}
+
+/// Like [`parse_boxes`], but recovers from malformed boxes instead of
+/// aborting: the tree parsed so far is returned together with a list of
+/// [`ParseIssue`]s describing what was wrong and where.
+///
+/// Damage is contained to the enclosing container: an unreadable child
+/// header abandons the *rest of that container's* bytes, while siblings of
+/// the container and everything above it keep parsing. A box whose interior
+/// fails to parse is downgraded to an opaque leaf. Boxes whose declared size
+/// overruns their parent are clamped (as in strict mode) and reported.
+///
+/// Only returns `Err` for I/O failures on the initial seek.
+pub fn parse_boxes_tolerant<R: Read + Seek>(
+    r: &mut R,
+    start: u64,
+    end: u64,
+) -> Result<(Vec<BoxRef>, Vec<ParseIssue>)> {
+    r.seek(SeekFrom::Start(start))?;
+    let mut issues = Vec::new();
+    let boxes = match parse_children_impl(r, end, &mut Some(&mut issues)) {
+        Ok(boxes) => boxes,
+        // parse_children_impl only propagates errors in strict mode or on
+        // seek failures; treat the latter as a terminal issue.
+        Err(e) => {
+            issues.push(ParseIssue {
+                offset: r.stream_position().unwrap_or(start),
+                message: format!("parse aborted: {}", e),
+            });
+            Vec::new()
+        }
+    };
+    Ok((boxes, issues))
+}
+
 /// Parse sibling boxes from the current stream position up to `parent_end`.
 pub fn parse_children<R: Read + Seek>(r: &mut R, parent_end: u64) -> Result<Vec<BoxRef>> {
+    parse_children_impl(r, parent_end, &mut None)
+}
+
+/// Shared strict/tolerant implementation: `issues: None` is strict mode
+/// (first error propagates), `Some` records problems and recovers.
+fn parse_children_impl<R: Read + Seek>(
+    r: &mut R,
+    parent_end: u64,
+    issues: &mut Option<&mut Vec<ParseIssue>>,
+) -> Result<Vec<BoxRef>> {
     let mut kids = Vec::new();
     // A box header needs at least 8 bytes; ignore trailing padding shorter
     // than that instead of erroring out.
     while r.stream_position()? + 8 <= parent_end {
-        let h = read_box_header(r)?;
+        let header_start = r.stream_position()?;
+        let h = match read_box_header(r) {
+            Ok(h) => h,
+            Err(e) => {
+                let Some(issues) = issues else {
+                    return Err(e);
+                };
+                // No reliable way to resync after a bad header; abandon the
+                // rest of this container.
+                issues.push(ParseIssue {
+                    offset: header_start,
+                    message: format!(
+                        "unreadable box header ({}); skipping remaining {} bytes of container",
+                        e,
+                        parent_end - header_start
+                    ),
+                });
+                break;
+            }
+        };
+
+        if let Some(issues) = issues
+            && h.size != 0
+            && h.start + h.size > parent_end
+        {
+            issues.push(ParseIssue {
+                offset: h.start,
+                message: format!(
+                    "box '{}' declares size {} which overruns its container by {} bytes; clamped",
+                    h.typ,
+                    h.size,
+                    h.start + h.size - parent_end
+                ),
+            });
+        }
         let box_end = box_end(&h, parent_end);
-        let kind = classify_box(r, &h, box_end)?;
+
+        let kind = match classify_box(r, &h, box_end, issues) {
+            Ok(kind) => kind,
+            Err(e) => {
+                let Some(issues) = issues else {
+                    return Err(e);
+                };
+                // The box's interior couldn't be parsed; keep it as an
+                // opaque leaf so the tree stays navigable.
+                issues.push(ParseIssue {
+                    offset: h.start,
+                    message: format!("failed to parse contents of '{}': {}", h.typ, e),
+                });
+                let data_offset = h.start + h.header_size;
+                NodeKind::Leaf {
+                    data_offset,
+                    data_len: box_end.saturating_sub(data_offset),
+                }
+            }
+        };
 
         // Skip to end of box
         r.seek(SeekFrom::Start(box_end))?;
@@ -98,25 +211,32 @@ fn read_version_flags<R: Read>(r: &mut R) -> Result<(u8, u32)> {
 
 /// Decide what kind of node a box is and parse its interior accordingly.
 /// Leaves the stream position unspecified; callers seek to `box_end` after.
-fn classify_box<R: Read + Seek>(r: &mut R, h: &BoxHeader, box_end: u64) -> Result<NodeKind> {
+fn classify_box<R: Read + Seek>(
+    r: &mut R,
+    h: &BoxHeader,
+    box_end: u64,
+    issues: &mut Option<&mut Vec<ParseIssue>>,
+) -> Result<NodeKind> {
     let kb = KnownBox::from(h.typ);
     let content_start = h.start + h.header_size;
 
     if kb == KnownBox::Stsd {
-        return parse_stsd(r, h, box_end);
+        return parse_stsd(r, h, box_end, issues);
     }
 
     if kb.is_full_container() {
         // QuickTime writes `meta` without version/flags; sniff for that.
         if kb == KnownBox::Meta && meta_is_quicktime_style(r, content_start, box_end)? {
             r.seek(SeekFrom::Start(content_start))?;
-            return Ok(NodeKind::Container(parse_children(r, box_end)?));
+            return Ok(NodeKind::Container(parse_children_impl(
+                r, box_end, issues,
+            )?));
         }
         r.seek(SeekFrom::Start(content_start))?;
         let (version, flags) = read_version_flags(r)?;
         let data_offset = r.stream_position()?;
         let data_len = box_end.saturating_sub(data_offset);
-        let children = parse_children(r, box_end)?;
+        let children = parse_children_impl(r, box_end, issues)?;
         return Ok(NodeKind::FullContainer {
             version,
             flags,
@@ -128,7 +248,9 @@ fn classify_box<R: Read + Seek>(r: &mut R, h: &BoxHeader, box_end: u64) -> Resul
 
     if kb.is_container() {
         r.seek(SeekFrom::Start(content_start))?;
-        return Ok(NodeKind::Container(parse_children(r, box_end)?));
+        return Ok(NodeKind::Container(parse_children_impl(
+            r, box_end, issues,
+        )?));
     }
 
     if kb.is_full_box() {
@@ -189,7 +311,12 @@ fn fourcc_is_printable(cc: &FourCC) -> bool {
 /// entry boxes (avc1, mp4a, ...). Each sample entry in turn has a
 /// codec-family-specific fixed header followed by child boxes (avcC, esds,
 /// pasp, btrt, ...).
-fn parse_stsd<R: Read + Seek>(r: &mut R, h: &BoxHeader, box_end: u64) -> Result<NodeKind> {
+fn parse_stsd<R: Read + Seek>(
+    r: &mut R,
+    h: &BoxHeader,
+    box_end: u64,
+    issues: &mut Option<&mut Vec<ParseIssue>>,
+) -> Result<NodeKind> {
     let content_start = h.start + h.header_size;
     r.seek(SeekFrom::Start(content_start))?;
     let (version, flags) = read_version_flags(r)?;
@@ -199,7 +326,20 @@ fn parse_stsd<R: Read + Seek>(r: &mut R, h: &BoxHeader, box_end: u64) -> Result<
 
     let mut children = Vec::new();
     while r.stream_position()? + 8 <= box_end {
-        let eh = read_box_header(r)?;
+        let entry_start = r.stream_position()?;
+        let eh = match read_box_header(r) {
+            Ok(eh) => eh,
+            Err(e) => {
+                let Some(issues) = issues else {
+                    return Err(e);
+                };
+                issues.push(ParseIssue {
+                    offset: entry_start,
+                    message: format!("unreadable stsd sample entry header ({})", e),
+                });
+                break;
+            }
+        };
         let entry_end = self::box_end(&eh, box_end);
         let kind = parse_sample_entry(r, &eh, entry_end)?;
         r.seek(SeekFrom::Start(entry_end))?;

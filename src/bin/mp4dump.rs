@@ -40,6 +40,12 @@ struct Args {
     /// Emit JSON instead of human-readable tree
     #[arg(long, action = ArgAction::SetTrue)]
     json: bool,
+
+    /// Fail on the first malformed box instead of the default behavior of
+    /// recovering, printing the partial tree, and reporting issues on
+    /// stderr (with exit code 2)
+    #[arg(long, action = ArgAction::SetTrue)]
+    strict: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -47,7 +53,11 @@ fn main() -> anyhow::Result<()> {
     let mut f = File::open(&args.path)?;
 
     let file_len = f.metadata()?.len();
-    let top = parse_boxes(&mut f, 0, file_len)?;
+    let (top, issues) = if args.strict {
+        (parse_boxes(&mut f, 0, file_len)?, Vec::new())
+    } else {
+        mp4box::parse_boxes_tolerant(&mut f, 0, file_len)?
+    };
 
     let reg = default_registry();
 
@@ -66,6 +76,7 @@ fn main() -> anyhow::Result<()> {
             .map(|b| build_json_for_box(&mut json_file, b, args.decode, &reg))
             .collect();
         println!("{}", serde_json::to_string_pretty(&json_boxes)?);
+        report_issues(&issues);
         return Ok(());
     }
 
@@ -79,7 +90,22 @@ fn main() -> anyhow::Result<()> {
         dump_raw(&mut f, &top, sel, args.bytes)?;
     }
 
+    report_issues(&issues);
     Ok(())
+}
+
+/// Print parse issues to stderr and exit with code 2 so scripts can detect
+/// damaged files. No-op for clean parses (and always in --strict mode,
+/// which errors before reaching here).
+fn report_issues(issues: &[mp4box::ParseIssue]) {
+    if issues.is_empty() {
+        return;
+    }
+    eprintln!("\n{} parse issue(s):", issues.len());
+    for issue in issues {
+        eprintln!("  {}", issue);
+    }
+    std::process::exit(2);
 }
 
 // ---------- Human-readable tree ----------
