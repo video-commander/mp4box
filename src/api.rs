@@ -73,6 +73,42 @@ pub fn get_boxes<R: Read + Seek>(r: &mut R, size: u64, decode: bool) -> anyhow::
 
 /// Like [`get_boxes`], but decodes with a caller-supplied [`Registry`]
 /// instead of the default one.
+///
+/// To *extend* the default registry with custom decoders (rather than
+/// replace it), build on [`default_registry`]:
+///
+/// ```no_run
+/// use mp4box::{BoxKey, FourCC, get_boxes_with_registry};
+/// use mp4box::registry::{BoxDecoder, BoxValue, default_registry};
+/// use std::fs::File;
+/// use std::io::Read;
+///
+/// struct MyDecoder;
+/// impl BoxDecoder for MyDecoder {
+///     fn decode(
+///         &self,
+///         r: &mut dyn Read,
+///         _hdr: &mp4box::BoxHeader,
+///         _version: Option<u8>,
+///         _flags: Option<u32>,
+///     ) -> anyhow::Result<BoxValue> {
+///         let mut buf = Vec::new();
+///         r.read_to_end(&mut buf)?;
+///         Ok(BoxValue::Text(format!("{} payload bytes", buf.len())))
+///     }
+/// }
+///
+/// let reg = default_registry().with_decoder(
+///     BoxKey::FourCC(FourCC(*b"xyz ")),
+///     "xyz ",
+///     Box::new(MyDecoder),
+/// );
+///
+/// let mut file = File::open("video.mp4")?;
+/// let size = file.metadata()?.len();
+/// let boxes = get_boxes_with_registry(&mut file, size, true, &reg)?;
+/// # Ok::<(), anyhow::Error>(())
+/// ```
 pub fn get_boxes_with_registry<R: Read + Seek>(
     r: &mut R,
     size: u64,

@@ -92,6 +92,7 @@ pub use parser::{parse_boxes, parse_children, read_box_header};
 pub use registry::{
     BoxValue, Co64Data, CttsData, CttsEntry, HdlrData, MdhdData, Registry, SampleEntry, StcoData,
     StructuredData, StscData, StscEntry, StsdData, StssData, StszData, SttsData, SttsEntry,
+    default_registry,
 };
 
 // High-level API
