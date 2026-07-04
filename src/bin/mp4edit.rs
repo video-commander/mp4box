@@ -38,6 +38,11 @@ struct Args {
     #[arg(long = "tag", value_name = "NAME=VALUE")]
     tag: Vec<String>,
 
+    /// Move moov before mdat for progressive playback ("faststart").
+    /// Chunk offsets are adjusted automatically; no-op if already ordered.
+    #[arg(long = "faststart")]
+    faststart: bool,
+
     /// Input MP4/ISOBMFF file (never modified)
     input: String,
 
@@ -110,6 +115,10 @@ fn main() -> anyhow::Result<()> {
             .split_once('=')
             .ok_or_else(|| anyhow::anyhow!("--tag format is NAME=VALUE, got '{}'", spec))?;
         editor.set_tag(name, value)?;
+    }
+
+    if args.faststart {
+        editor.faststart();
     }
 
     let stats = editor.process_file(&args.input, &args.output)?;

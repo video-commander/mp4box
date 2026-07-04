@@ -69,6 +69,16 @@ pub enum Command {
     /// Set an iTunes metadata tag, creating `moov/udta/meta/ilst` as needed.
     /// `tag` is a friendly name (`"title"`, `"artist"`, ...) or a raw fourcc.
     SetTag { tag: String, value: String },
+    /// Move `moov` before the first `mdat` ("faststart") so players can
+    /// begin progressive playback without downloading the whole file.
+    /// Chunk offsets are remapped automatically. No-op when the file is
+    /// already faststart-ordered or has no `mdat`.
+    ///
+    /// Note: on >4 GiB files using 32-bit `stco`, offsets pushed past
+    /// `u32::MAX` cannot be represented and are reported via
+    /// [`EditStats::chunk_offsets_unmapped`] (stco→co64 conversion is not
+    /// implemented yet).
+    Faststart,
 }
 
 /// Statistics from a completed edit.
@@ -120,6 +130,11 @@ impl Editor {
             field: field.into(),
             value: value.into(),
         })
+    }
+
+    /// Convenience for [`Command::Faststart`].
+    pub fn faststart(&mut self) -> &mut Self {
+        self.add_command(Command::Faststart)
     }
 
     /// Convenience for [`Command::SetTag`]. Validates the tag name eagerly.
@@ -276,6 +291,25 @@ fn apply_command<R: Read + Seek>(
                 .find(|n| &n.typ.0 == b"moov")
                 .ok_or_else(|| anyhow::anyhow!("no moov box: cannot set tags"))?;
             tags::set_tag_in_moov(moov, &cc, value)?;
+        }
+
+        Command::Faststart => {
+            let moov_idx = tree
+                .roots
+                .iter()
+                .position(|n| &n.typ.0 == b"moov")
+                .ok_or_else(|| anyhow::anyhow!("no moov box: cannot faststart"))?;
+            let Some(mdat_idx) = tree.roots.iter().position(|n| &n.typ.0 == b"mdat") else {
+                return Ok(()); // no media data: nothing to optimize
+            };
+            if moov_idx < mdat_idx {
+                return Ok(()); // already faststart-ordered
+            }
+            let moov = tree.roots.remove(moov_idx);
+            // Place moov right after a leading ftyp (which must stay first),
+            // otherwise at the very front.
+            let at = usize::from(tree.roots.first().is_some_and(|n| &n.typ.0 == b"ftyp"));
+            tree.roots.insert(at, moov);
         }
     }
     Ok(())

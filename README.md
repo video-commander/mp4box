@@ -178,6 +178,7 @@ editor.set_tag("title", "My Movie")?;
 editor.set_field("moov/mvhd", "creation_time", "0");
 editor.remove("moov/udta/meta");           // paths support indices: moov/trak[1]/...
 editor.remove_all("free");                 // strip every `free` box
+editor.faststart();                        // move moov before mdat
 
 let stats = editor.process_file("in.mp4", "out.mp4")?;
 println!("{} chunk offsets adjusted", stats.chunk_offsets_adjusted);
@@ -262,6 +263,12 @@ $ mp4edit --tag title="My Movie" --tag artist="Me" \
           --remove-all free \
           input.mp4 output.mp4
 wrote output.mp4 (158008454 bytes, 2336 chunk offsets adjusted)
+```
+
+Optimize for progressive playback (moov before mdat, like `qt-faststart`):
+
+```bash
+$ mp4edit --faststart input.mp4 output.mp4
 ```
 
 ---

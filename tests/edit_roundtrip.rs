@@ -509,3 +509,121 @@ fn missing_path_errors_cleanly() {
     let err = editor.process(&mut src, &mut dst).unwrap_err();
     assert!(err.to_string().contains("not found"), "err: {err}");
 }
+
+// ---------- faststart ----------
+
+fn top_level_types(data: &[u8]) -> Vec<String> {
+    let len = data.len() as u64;
+    let mut cur = Cursor::new(data);
+    get_boxes(&mut cur, len, false)
+        .unwrap()
+        .iter()
+        .map(|b| b.typ.clone())
+        .collect()
+}
+
+#[test]
+fn faststart_moves_moov_and_remaps_offsets() {
+    // Fixture order is ftyp, free, mdat, moov — a classic non-faststart file.
+    let (input, old_offset) = build_progressive_file();
+    assert_eq!(top_level_types(&input), ["ftyp", "free", "mdat", "moov"]);
+
+    let mut editor = Editor::new();
+    editor.faststart();
+    let output = run_editor(&editor, &input);
+
+    // moov lands right after ftyp; everything else keeps relative order.
+    assert_eq!(top_level_types(&output), ["ftyp", "moov", "free", "mdat"]);
+    assert_eq!(output.len(), input.len(), "reorder must not change size");
+
+    // mdat moved later by exactly moov's size; stco follows it.
+    let moov_size = {
+        let len = input.len() as u64;
+        let mut cur = Cursor::new(&input);
+        get_boxes(&mut cur, len, false)
+            .unwrap()
+            .iter()
+            .find(|b| b.typ == "moov")
+            .unwrap()
+            .size
+    };
+    assert_eq!(first_chunk_offset(&output), old_offset + moov_size);
+    assert_samples_intact(&output);
+}
+
+#[test]
+fn faststart_is_idempotent() {
+    let (input, _) = build_progressive_file();
+
+    let mut editor = Editor::new();
+    editor.faststart();
+    let once = run_editor(&editor, &input);
+    let twice = run_editor(&editor, &once);
+
+    assert_eq!(once, twice, "faststart on a faststart file must be a no-op");
+}
+
+#[test]
+fn faststart_combines_with_other_edits() {
+    let (input, _) = build_progressive_file();
+
+    let mut editor = Editor::new();
+    editor.set_tag("title", "Streamed").unwrap();
+    editor.remove_all("free");
+    editor.faststart();
+    let output = run_editor(&editor, &input);
+
+    assert_eq!(top_level_types(&output), ["ftyp", "moov", "mdat"]);
+    assert_samples_intact(&output);
+    let len = output.len() as u64;
+    let mut cur = Cursor::new(&output);
+    let tags = get_itunes_tags(&mut cur, len).unwrap();
+    assert_eq!(tags.get("title").map(String::as_str), Some("Streamed"));
+}
+
+#[test]
+fn faststart_real_file_still_decodes() {
+    // tears-of-steel has moov at the end (classic non-faststart mux).
+    let path = "tears-of-steel-360p_encoded_1773818279309.mp4";
+    if !std::path::Path::new(path).exists() {
+        eprintln!("skipping: {path} not present");
+        return;
+    }
+
+    let input = std::fs::read(path).unwrap();
+    let before = track_samples_from_reader(Cursor::new(input.clone())).unwrap();
+
+    let mut editor = Editor::new();
+    editor.faststart();
+    let mut src = Cursor::new(&input);
+    let mut output = Vec::with_capacity(input.len());
+    let stats = editor.process(&mut src, &mut output).unwrap();
+    assert!(stats.chunk_offsets_adjusted > 0);
+    assert_eq!(stats.chunk_offsets_unmapped, 0);
+    assert_eq!(output.len(), input.len());
+
+    // moov now precedes mdat.
+    let types = top_level_types(&output);
+    let moov_pos = types.iter().position(|t| t == "moov").unwrap();
+    let mdat_pos = types.iter().position(|t| t == "mdat").unwrap();
+    assert!(moov_pos < mdat_pos);
+
+    // Every sample must contain the same media bytes as before.
+    let after = track_samples_from_reader(Cursor::new(output.clone())).unwrap();
+    assert_eq!(before.len(), after.len());
+    for (tb, ta) in before.iter().zip(&after) {
+        assert_eq!(tb.sample_count, ta.sample_count);
+        // Spot-check first/middle/last samples per track.
+        for idx in [0, tb.samples.len() / 2, tb.samples.len() - 1] {
+            let (sb, sa) = (&tb.samples[idx], &ta.samples[idx]);
+            assert_eq!(sb.size, sa.size);
+            let old = &input[sb.file_offset as usize..(sb.file_offset + sb.size as u64) as usize];
+            let new = &output[sa.file_offset as usize..(sa.file_offset + sa.size as u64) as usize];
+            assert_eq!(
+                old, new,
+                "track {} sample {} bytes differ",
+                tb.track_id, idx
+            );
+        }
+    }
+}
