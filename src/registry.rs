@@ -38,8 +38,257 @@ pub enum StructuredData {
     HandlerReference(HdlrData),
     /// Track Header Box (tkhd)
     TrackHeader(TkhdData),
+    /// Movie Header Box (mvhd)
+    MovieHeader(MvhdData),
+    /// Edit List Box (elst)
+    EditList(ElstData),
+    /// Segment Index Box (sidx)
+    SegmentIndex(SidxData),
     /// Track Fragment Run Box (trun)
     TrackFragmentRun(TrunData),
+    /// Track Fragment Header Box (tfhd)
+    TrackFragmentHeader(TfhdData),
+    /// Track Fragment Decode Time Box (tfdt)
+    TrackFragmentDecodeTime(TfdtData),
+    /// Track Extends Box (trex)
+    TrackExtends(TrexData),
+}
+
+impl StructuredData {
+    /// One-line human-readable summary, used as the `decoded` string in the
+    /// high-level API and by the CLI tools.
+    pub fn summary(&self) -> String {
+        match self {
+            StructuredData::MovieHeader(d) => {
+                format!("timescale={} duration={}", d.timescale, d.duration)
+            }
+            StructuredData::TrackHeader(d) => format!(
+                "track_id={} duration={} width={} height={} flags=0x{:06X}",
+                d.track_id, d.duration, d.width, d.height, d.flags
+            ),
+            StructuredData::MediaHeader(d) => format!(
+                "timescale={} duration={} language={}",
+                d.timescale, d.duration, d.language
+            ),
+            StructuredData::HandlerReference(d) => {
+                format!("handler_type={} name={:?}", d.handler_type, d.name)
+            }
+            StructuredData::EditList(d) => match d.entries.first() {
+                Some(e) => format!(
+                    "version={} entries={} first: duration={} media_time={} rate={}/{}",
+                    d.version,
+                    d.entry_count,
+                    e.segment_duration,
+                    e.media_time,
+                    e.media_rate_integer,
+                    e.media_rate_fraction
+                ),
+                None => format!("version={} entries=0", d.version),
+            },
+            StructuredData::SegmentIndex(d) => format!(
+                "timescale={} earliest_presentation_time={} first_offset={} references={}",
+                d.timescale,
+                d.earliest_presentation_time,
+                d.first_offset,
+                d.references.len()
+            ),
+            StructuredData::SampleDescription(d) => {
+                let e = d.entries.first();
+                match e {
+                    Some(e) => {
+                        let mut s = format!("codec={}", e.codec);
+                        if let (Some(w), Some(h)) = (e.width, e.height) {
+                            s.push_str(&format!(" {}x{}", w, h));
+                        }
+                        if let Some(ch) = e.channel_count {
+                            s.push_str(&format!(" channels={}", ch));
+                        }
+                        if let Some(sr) = e.sample_rate {
+                            s.push_str(&format!(" sample_rate={}", sr));
+                        }
+                        if let Some(bits) = e.sample_size {
+                            s.push_str(&format!(" bits={}", bits));
+                        }
+                        s.push_str(&format!(" entries={}", d.entry_count));
+                        s
+                    }
+                    None => "entries=0".to_string(),
+                }
+            }
+            StructuredData::DecodingTimeToSample(d) => {
+                let summary: Vec<String> = d
+                    .entries
+                    .iter()
+                    .take(4)
+                    .map(|e| format!("{}×{}", e.sample_count, e.sample_delta))
+                    .collect();
+                let ellipsis = if d.entry_count > 4 { ", …" } else { "" };
+                format!(
+                    "entries={} [{}{}]",
+                    d.entry_count,
+                    summary.join(", "),
+                    ellipsis
+                )
+            }
+            StructuredData::CompositionTimeToSample(d) => format!("entries={}", d.entry_count),
+            StructuredData::SampleToChunk(d) => format!("entries={}", d.entry_count),
+            StructuredData::SampleSize(d) => {
+                if d.sample_size > 0 {
+                    format!("fixed_size={} count={}", d.sample_size, d.sample_count)
+                } else {
+                    format!("variable count={}", d.sample_count)
+                }
+            }
+            StructuredData::SyncSample(d) => format!("keyframes={}", d.entry_count),
+            StructuredData::ChunkOffset(d) => format!("chunks={}", d.entry_count),
+            StructuredData::ChunkOffset64(d) => format!("chunks={}", d.entry_count),
+            StructuredData::TrackFragmentRun(d) => {
+                let mut parts = vec![format!("samples={}", d.sample_count)];
+                if let Some(off) = d.data_offset {
+                    parts.push(format!("data_offset={}", off));
+                }
+                let has_dur = d.flags & 0x100 != 0;
+                let has_size = d.flags & 0x200 != 0;
+                if (has_dur || has_size)
+                    && let Some(first) = d.samples.first()
+                {
+                    if let Some(dur) = first.duration {
+                        parts.push(format!("first_dur={}", dur));
+                    }
+                    if let Some(sz) = first.size {
+                        parts.push(format!("first_size={}", sz));
+                    }
+                }
+                parts.join(" ")
+            }
+            StructuredData::TrackFragmentHeader(d) => {
+                let mut parts = vec![format!("track_id={}", d.track_id)];
+                if let Some(v) = d.base_data_offset {
+                    parts.push(format!("base_data_offset={}", v));
+                }
+                if let Some(v) = d.sample_description_index {
+                    parts.push(format!("sample_description_index={}", v));
+                }
+                if let Some(v) = d.default_sample_duration {
+                    parts.push(format!("default_duration={}", v));
+                }
+                if let Some(v) = d.default_sample_size {
+                    parts.push(format!("default_size={}", v));
+                }
+                if let Some(v) = d.default_sample_flags {
+                    parts.push(format!("default_flags=0x{:08X}", v));
+                }
+                if d.default_base_is_moof {
+                    parts.push("default_base_is_moof".into());
+                }
+                parts.join(" ")
+            }
+            StructuredData::TrackFragmentDecodeTime(d) => {
+                format!("base_media_decode_time={}", d.base_media_decode_time)
+            }
+            StructuredData::TrackExtends(d) => format!(
+                "track_id={} default_sample_description_index={} default_sample_duration={} default_sample_size={} default_sample_flags=0x{:08X}",
+                d.track_id,
+                d.default_sample_description_index,
+                d.default_sample_duration,
+                d.default_sample_size,
+                d.default_sample_flags
+            ),
+        }
+    }
+}
+
+/// Movie Header Box data
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MvhdData {
+    pub version: u8,
+    pub flags: u32,
+    pub creation_time: u64,
+    pub modification_time: u64,
+    pub timescale: u32,
+    pub duration: u64,
+    /// Playback rate (1.0 = normal), from the 16.16 fixed-point field
+    pub rate: f32,
+    /// Playback volume (1.0 = full), from the 8.8 fixed-point field
+    pub volume: f32,
+    pub next_track_id: u32,
+}
+
+/// Edit List Box data
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ElstData {
+    pub version: u8,
+    pub flags: u32,
+    pub entry_count: u32,
+    pub entries: Vec<ElstEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ElstEntry {
+    /// Edit duration in movie timescale units
+    pub segment_duration: u64,
+    /// Start time within the media (-1 = empty edit)
+    pub media_time: i64,
+    pub media_rate_integer: i16,
+    pub media_rate_fraction: i16,
+}
+
+/// Segment Index Box data
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SidxData {
+    pub version: u8,
+    pub flags: u32,
+    pub reference_id: u32,
+    pub timescale: u32,
+    pub earliest_presentation_time: u64,
+    pub first_offset: u64,
+    pub references: Vec<SidxReference>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SidxReference {
+    /// 1 = reference to another sidx, 0 = reference to media
+    pub reference_type: u8,
+    pub referenced_size: u32,
+    pub subsegment_duration: u32,
+    pub starts_with_sap: bool,
+    pub sap_type: u8,
+    pub sap_delta_time: u32,
+}
+
+/// Track Fragment Header Box data
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TfhdData {
+    pub version: u8,
+    pub flags: u32,
+    pub track_id: u32,
+    pub base_data_offset: Option<u64>,
+    pub sample_description_index: Option<u32>,
+    pub default_sample_duration: Option<u32>,
+    pub default_sample_size: Option<u32>,
+    pub default_sample_flags: Option<u32>,
+    /// Flag 0x010000: the fragment's samples have no duration
+    pub duration_is_empty: bool,
+    /// Flag 0x020000: offsets are relative to the enclosing moof
+    pub default_base_is_moof: bool,
+}
+
+/// Track Fragment Decode Time Box data
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TfdtData {
+    pub version: u8,
+    pub flags: u32,
+    pub base_media_decode_time: u64,
+}
+
+/// Track Extends Box data (per-track defaults for fragments)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TrexData {
+    pub track_id: u32,
+    pub default_sample_description_index: u32,
+    pub default_sample_duration: u32,
+    pub default_sample_size: u32,
+    pub default_sample_flags: u32,
 }
 
 /// Sample Description Box data
@@ -346,27 +595,44 @@ impl BoxDecoder for MvhdDecoder {
         r: &mut dyn Read,
         _hdr: &BoxHeader,
         version: Option<u8>,
-        _flags: Option<u32>,
+        flags: Option<u32>,
     ) -> anyhow::Result<BoxValue> {
         // mvhd is a FullBox: version/flags are stripped by the parser and
         // passed in, so the payload starts at creation_time.
-        let (timescale, duration) = if version.unwrap_or(0) == 1 {
-            let _creation = r.read_u64::<BigEndian>()?;
-            let _mod = r.read_u64::<BigEndian>()?;
+        let version = version.unwrap_or(0);
+        let (creation_time, modification_time, timescale, duration) = if version == 1 {
+            let creation = r.read_u64::<BigEndian>()?;
+            let modification = r.read_u64::<BigEndian>()?;
             let ts = r.read_u32::<BigEndian>()?;
             let dur = r.read_u64::<BigEndian>()?;
-            (ts, dur)
+            (creation, modification, ts, dur)
         } else {
-            let _creation = r.read_u32::<BigEndian>()?;
-            let _mod = r.read_u32::<BigEndian>()?;
+            let creation = r.read_u32::<BigEndian>()? as u64;
+            let modification = r.read_u32::<BigEndian>()? as u64;
             let ts = r.read_u32::<BigEndian>()?;
             let dur = r.read_u32::<BigEndian>()? as u64;
-            (ts, dur)
+            (creation, modification, ts, dur)
         };
 
-        Ok(BoxValue::Text(format!(
-            "timescale={} duration={}",
-            timescale, duration
+        let rate = r.read_i32::<BigEndian>()? as f32 / 65536.0;
+        let volume = r.read_i16::<BigEndian>()? as f32 / 256.0;
+        // reserved (10) + matrix (36) + pre_defined (24)
+        let mut skip = [0u8; 10 + 36 + 24];
+        r.read_exact(&mut skip)?;
+        let next_track_id = r.read_u32::<BigEndian>()?;
+
+        Ok(BoxValue::Structured(StructuredData::MovieHeader(
+            MvhdData {
+                version,
+                flags: flags.unwrap_or(0),
+                creation_time,
+                modification_time,
+                timescale,
+                duration,
+                rate,
+                volume,
+                next_track_id,
+            },
         )))
     }
 }
@@ -544,29 +810,51 @@ impl BoxDecoder for SidxDecoder {
         r: &mut dyn Read,
         _hdr: &BoxHeader,
         version: Option<u8>,
-        _flags: Option<u32>,
+        flags: Option<u32>,
     ) -> anyhow::Result<BoxValue> {
         // sidx is a FullBox: version/flags are stripped by the parser and
         // passed in, so the payload starts at reference_ID.
-        let _ref_id = r.read_u32::<BigEndian>()?;
+        let version = version.unwrap_or(0);
+        let reference_id = r.read_u32::<BigEndian>()?;
         let timescale = r.read_u32::<BigEndian>()?;
 
-        let (earliest, first_offset) = if version.unwrap_or(0) == 1 {
-            let earliest = r.read_u64::<BigEndian>()?;
-            let first = r.read_u64::<BigEndian>()?;
-            (earliest, first)
+        let (earliest_presentation_time, first_offset) = if version == 1 {
+            (r.read_u64::<BigEndian>()?, r.read_u64::<BigEndian>()?)
         } else {
-            let earliest = r.read_u32::<BigEndian>()? as u64;
-            let first = r.read_u32::<BigEndian>()? as u64;
-            (earliest, first)
+            (
+                r.read_u32::<BigEndian>()? as u64,
+                r.read_u32::<BigEndian>()? as u64,
+            )
         };
 
         let _reserved = r.read_u16::<BigEndian>()?;
         let ref_count = r.read_u16::<BigEndian>()?;
 
-        Ok(BoxValue::Text(format!(
-            "timescale={} earliest_presentation_time={} first_offset={} references={}",
-            timescale, earliest, first_offset, ref_count
+        let mut references = Vec::with_capacity(ref_count as usize);
+        for _ in 0..ref_count {
+            let word = r.read_u32::<BigEndian>()?;
+            let subsegment_duration = r.read_u32::<BigEndian>()?;
+            let sap = r.read_u32::<BigEndian>()?;
+            references.push(SidxReference {
+                reference_type: ((word >> 31) & 1) as u8,
+                referenced_size: word & 0x7FFF_FFFF,
+                subsegment_duration,
+                starts_with_sap: (sap >> 31) & 1 == 1,
+                sap_type: ((sap >> 28) & 0x07) as u8,
+                sap_delta_time: sap & 0x0FFF_FFFF,
+            });
+        }
+
+        Ok(BoxValue::Structured(StructuredData::SegmentIndex(
+            SidxData {
+                version,
+                flags: flags.unwrap_or(0),
+                reference_id,
+                timescale,
+                earliest_presentation_time,
+                first_offset,
+                references,
+            },
         )))
     }
 }
@@ -1038,91 +1326,37 @@ impl BoxDecoder for ElstDecoder {
         r: &mut dyn Read,
         _hdr: &BoxHeader,
         version: Option<u8>,
-        _flags: Option<u32>,
+        flags: Option<u32>,
     ) -> anyhow::Result<BoxValue> {
         // elst is a FullBox: version/flags are stripped by the parser and
         // passed in, so the payload starts at entry_count.
-        let buf = read_all(r)?;
-        if buf.len() < 4 {
-            return Ok(BoxValue::Text(format!(
-                "elst: payload too short ({} bytes)",
-                buf.len()
-            )));
-        }
-
         let version = version.unwrap_or(0);
-        let mut pos = 0usize;
+        let entry_count = r.read_u32::<BigEndian>()?;
 
-        let read_u32 = |pos: &mut usize| -> Option<u32> {
-            if *pos + 4 > buf.len() {
-                return None;
-            }
-            let v = u32::from_be_bytes(buf[*pos..*pos + 4].try_into().unwrap());
-            *pos += 4;
-            Some(v)
-        };
-        let read_u64 = |pos: &mut usize| -> Option<u64> {
-            if *pos + 8 > buf.len() {
-                return None;
-            }
-            let v = u64::from_be_bytes(buf[*pos..*pos + 8].try_into().unwrap());
-            *pos += 8;
-            Some(v)
-        };
-        let read_i32 = |pos: &mut usize| -> Option<i32> {
-            if *pos + 4 > buf.len() {
-                return None;
-            }
-            let v = i32::from_be_bytes(buf[*pos..*pos + 4].try_into().unwrap());
-            *pos += 4;
-            Some(v)
-        };
-        let read_i64 = |pos: &mut usize| -> Option<i64> {
-            if *pos + 8 > buf.len() {
-                return None;
-            }
-            let v = i64::from_be_bytes(buf[*pos..*pos + 8].try_into().unwrap());
-            *pos += 8;
-            Some(v)
-        };
-        let read_i16 = |pos: &mut usize| -> Option<i16> {
-            if *pos + 2 > buf.len() {
-                return None;
-            }
-            let v = i16::from_be_bytes(buf[*pos..*pos + 2].try_into().unwrap());
-            *pos += 2;
-            Some(v)
-        };
-
-        let entry_count = read_u32(&mut pos).unwrap_or(0);
-
-        if entry_count == 0 {
-            return Ok(BoxValue::Text(format!("version={} entries=0", version)));
+        let mut entries = Vec::new();
+        for _ in 0..entry_count {
+            let (segment_duration, media_time) = if version == 1 {
+                (r.read_u64::<BigEndian>()?, r.read_i64::<BigEndian>()?)
+            } else {
+                (
+                    r.read_u32::<BigEndian>()? as u64,
+                    r.read_i32::<BigEndian>()? as i64,
+                )
+            };
+            entries.push(ElstEntry {
+                segment_duration,
+                media_time,
+                media_rate_integer: r.read_i16::<BigEndian>()?,
+                media_rate_fraction: r.read_i16::<BigEndian>()?,
+            });
         }
 
-        let (seg_duration, media_time) = if version == 1 {
-            let dur = read_u64(&mut pos).unwrap_or(0);
-            let mt = read_i64(&mut pos).unwrap_or(0);
-            (dur, mt)
-        } else {
-            let dur = read_u32(&mut pos).unwrap_or(0) as u64;
-            let mt = read_i32(&mut pos).unwrap_or(0) as i64;
-            (dur, mt)
-        };
-
-        let rate_int = read_i16(&mut pos);
-        let rate_frac = read_i16(&mut pos);
-
-        match (rate_int, rate_frac) {
-            (Some(ri), Some(rf)) => Ok(BoxValue::Text(format!(
-                "version={} entries={} first: duration={} media_time={} rate={}/{}",
-                version, entry_count, seg_duration, media_time, ri, rf
-            ))),
-            _ => Ok(BoxValue::Text(format!(
-                "version={} entries={} first: duration={} media_time={} (no rate, short payload)",
-                version, entry_count, seg_duration, media_time
-            ))),
-        }
+        Ok(BoxValue::Structured(StructuredData::EditList(ElstData {
+            version,
+            flags: flags.unwrap_or(0),
+            entry_count,
+            entries,
+        })))
     }
 }
 
@@ -1868,7 +2102,7 @@ impl BoxDecoder for TfhdDecoder {
         &self,
         r: &mut dyn Read,
         _hdr: &BoxHeader,
-        _version: Option<u8>,
+        version: Option<u8>,
         flags: Option<u32>,
     ) -> anyhow::Result<BoxValue> {
         let fl = flags.unwrap_or(0);
@@ -1883,42 +2117,36 @@ impl BoxDecoder for TfhdDecoder {
         } else {
             None
         };
-        let default_duration = if fl & 0x000008 != 0 {
+        let default_sample_duration = if fl & 0x000008 != 0 {
             Some(r.read_u32::<BigEndian>()?)
         } else {
             None
         };
-        let default_size = if fl & 0x000010 != 0 {
+        let default_sample_size = if fl & 0x000010 != 0 {
             Some(r.read_u32::<BigEndian>()?)
         } else {
             None
         };
-        let default_flags = if fl & 0x000020 != 0 {
+        let default_sample_flags = if fl & 0x000020 != 0 {
             Some(r.read_u32::<BigEndian>()?)
         } else {
             None
         };
 
-        let mut parts = vec![format!("track_id={}", track_id)];
-        if let Some(v) = base_data_offset {
-            parts.push(format!("base_data_offset={}", v));
-        }
-        if let Some(v) = sample_description_index {
-            parts.push(format!("sample_description_index={}", v));
-        }
-        if let Some(v) = default_duration {
-            parts.push(format!("default_duration={}", v));
-        }
-        if let Some(v) = default_size {
-            parts.push(format!("default_size={}", v));
-        }
-        if let Some(v) = default_flags {
-            parts.push(format!("default_flags=0x{:08X}", v));
-        }
-        if fl & 0x010000 != 0 {
-            parts.push("default_base_is_moof".into());
-        }
-        Ok(BoxValue::Text(parts.join(" ")))
+        Ok(BoxValue::Structured(StructuredData::TrackFragmentHeader(
+            TfhdData {
+                version: version.unwrap_or(0),
+                flags: fl,
+                track_id,
+                base_data_offset,
+                sample_description_index,
+                default_sample_duration,
+                default_sample_size,
+                default_sample_flags,
+                duration_is_empty: fl & 0x010000 != 0,
+                default_base_is_moof: fl & 0x020000 != 0,
+            },
+        )))
     }
 }
 
@@ -1931,17 +2159,21 @@ impl BoxDecoder for TfdtDecoder {
         r: &mut dyn Read,
         _hdr: &BoxHeader,
         version: Option<u8>,
-        _flags: Option<u32>,
+        flags: Option<u32>,
     ) -> anyhow::Result<BoxValue> {
-        let base_decode_time = if version.unwrap_or(0) == 1 {
+        let version = version.unwrap_or(0);
+        let base_media_decode_time = if version == 1 {
             r.read_u64::<BigEndian>()?
         } else {
             r.read_u32::<BigEndian>()? as u64
         };
-        Ok(BoxValue::Text(format!(
-            "base_media_decode_time={}",
-            base_decode_time
-        )))
+        Ok(BoxValue::Structured(
+            StructuredData::TrackFragmentDecodeTime(TfdtData {
+                version,
+                flags: flags.unwrap_or(0),
+                base_media_decode_time,
+            }),
+        ))
     }
 }
 
@@ -1956,18 +2188,14 @@ impl BoxDecoder for TrexDecoder {
         _version: Option<u8>,
         _flags: Option<u32>,
     ) -> anyhow::Result<BoxValue> {
-        let track_id = r.read_u32::<BigEndian>()?;
-        let default_sample_description_index = r.read_u32::<BigEndian>()?;
-        let default_sample_duration = r.read_u32::<BigEndian>()?;
-        let default_sample_size = r.read_u32::<BigEndian>()?;
-        let default_sample_flags = r.read_u32::<BigEndian>()?;
-        Ok(BoxValue::Text(format!(
-            "track_id={} default_sample_description_index={} default_sample_duration={} default_sample_size={} default_sample_flags=0x{:08X}",
-            track_id,
-            default_sample_description_index,
-            default_sample_duration,
-            default_sample_size,
-            default_sample_flags
+        Ok(BoxValue::Structured(StructuredData::TrackExtends(
+            TrexData {
+                track_id: r.read_u32::<BigEndian>()?,
+                default_sample_description_index: r.read_u32::<BigEndian>()?,
+                default_sample_duration: r.read_u32::<BigEndian>()?,
+                default_sample_size: r.read_u32::<BigEndian>()?,
+                default_sample_flags: r.read_u32::<BigEndian>()?,
+            },
         )))
     }
 }

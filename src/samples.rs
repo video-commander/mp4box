@@ -170,7 +170,162 @@ pub fn track_samples_from_reader<R: Read + Seek>(
         }
     }
 
+    // Fragmented MP4: samples live in moof/traf/trun rather than stbl.
+    extract_fragment_samples(&boxes, &mut result);
+
     Ok(result)
+}
+
+/// Append samples described by movie fragments (`moof`) to their tracks.
+///
+/// Implements the ISO 14496-12 §8.8 defaulting chain: per-sample trun values,
+/// then trun first_sample_flags (first sample only), then tfhd defaults, then
+/// trex defaults. Byte offsets use tfhd base_data_offset when present and the
+/// enclosing moof's start offset otherwise (the default-base-is-moof rule,
+/// which is also the practical fallback for legacy files).
+fn extract_fragment_samples(boxes: &[crate::Box], tracks: &mut [TrackSamples]) {
+    use crate::registry::{StructuredData, TrexData};
+    use std::collections::HashMap;
+
+    // trex defaults from moov > mvex > trex
+    let mut trex_map: HashMap<u32, TrexData> = HashMap::new();
+    for moov in boxes.iter().filter(|b| b.typ == "moov") {
+        let Some(kids) = &moov.children else { continue };
+        for mvex in kids.iter().filter(|b| b.typ == "mvex") {
+            let Some(mkids) = &mvex.children else {
+                continue;
+            };
+            for trex in mkids.iter().filter(|b| b.typ == "trex") {
+                if let Some(StructuredData::TrackExtends(d)) = &trex.structured_data {
+                    trex_map.insert(d.track_id, d.clone());
+                }
+            }
+        }
+    }
+
+    // Running decode time per track, for trafs without a tfdt.
+    let mut next_dts: HashMap<u32, u64> = tracks
+        .iter()
+        .map(|t| {
+            let end = t
+                .samples
+                .last()
+                .map(|s| s.dts + s.duration as u64)
+                .unwrap_or(0);
+            (t.track_id, end)
+        })
+        .collect();
+
+    let original_counts: Vec<usize> = tracks.iter().map(|t| t.samples.len()).collect();
+
+    for moof in boxes.iter().filter(|b| b.typ == "moof") {
+        let moof_start = moof.offset;
+        let Some(kids) = &moof.children else { continue };
+
+        for traf in kids.iter().filter(|b| b.typ == "traf") {
+            let Some(tkids) = &traf.children else {
+                continue;
+            };
+            let Some(tfhd) = tkids.iter().find_map(|b| match &b.structured_data {
+                Some(StructuredData::TrackFragmentHeader(d)) => Some(d),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let tfdt = tkids.iter().find_map(|b| match &b.structured_data {
+                Some(StructuredData::TrackFragmentDecodeTime(d)) => Some(d),
+                _ => None,
+            });
+            let Some(track) = tracks.iter_mut().find(|t| t.track_id == tfhd.track_id) else {
+                continue;
+            };
+            let trex = trex_map.get(&tfhd.track_id);
+
+            let mut dts = tfdt
+                .map(|d| d.base_media_decode_time)
+                .unwrap_or_else(|| next_dts.get(&tfhd.track_id).copied().unwrap_or(0));
+
+            let base = tfhd.base_data_offset.unwrap_or(moof_start);
+            // Where the previous trun's data ended, for truns without a
+            // data_offset of their own.
+            let mut cursor: Option<u64> = None;
+
+            for trun_box in tkids.iter().filter(|b| b.typ == "trun") {
+                let Some(StructuredData::TrackFragmentRun(trun)) = &trun_box.structured_data else {
+                    continue;
+                };
+
+                let mut offset = match trun.data_offset {
+                    Some(d) => base.saturating_add_signed(d as i64),
+                    None => cursor.unwrap_or(base),
+                };
+
+                for (j, s) in trun.samples.iter().enumerate() {
+                    let duration = s
+                        .duration
+                        .or(tfhd.default_sample_duration)
+                        .or(trex.map(|t| t.default_sample_duration))
+                        .unwrap_or(0);
+                    let size = s
+                        .size
+                        .or(tfhd.default_sample_size)
+                        .or(trex.map(|t| t.default_sample_size))
+                        .unwrap_or(0);
+                    let flags = s
+                        .flags
+                        .or(if j == 0 {
+                            trun.first_sample_flags
+                        } else {
+                            None
+                        })
+                        .or(tfhd.default_sample_flags)
+                        .or(trex.map(|t| t.default_sample_flags))
+                        .unwrap_or(0);
+                    let cto = s.composition_time_offset.unwrap_or(0);
+                    let pts = dts.saturating_add_signed(cto as i64);
+
+                    track.samples.push(SampleInfo {
+                        index: track.samples.len() as u32,
+                        dts,
+                        pts,
+                        start_time: if track.timescale > 0 {
+                            pts as f64 / track.timescale as f64
+                        } else {
+                            0.0
+                        },
+                        duration,
+                        rendered_offset: cto as i64,
+                        file_offset: offset,
+                        size,
+                        // sample_flags bit 16: sample_is_non_sync_sample
+                        is_sync: flags & 0x0001_0000 == 0,
+                    });
+
+                    offset += size as u64;
+                    dts += duration as u64;
+                }
+                cursor = Some(offset);
+            }
+            next_dts.insert(tfhd.track_id, dts);
+        }
+    }
+
+    // Fragmented files usually declare duration 0 in mdhd; fill in the
+    // observed duration for tracks that gained fragment samples.
+    for (track, original) in tracks.iter_mut().zip(original_counts) {
+        if track.samples.len() == original {
+            continue;
+        }
+        track.sample_count = track.samples.len() as u32;
+        let end = track
+            .samples
+            .last()
+            .map(|s| s.dts + s.duration as u64)
+            .unwrap_or(0);
+        if track.duration < end {
+            track.duration = end;
+        }
+    }
 }
 
 /// Extracts sample information from all tracks in an MP4 file specified by file path.
@@ -452,11 +607,8 @@ fn extract_sample_tables(stbl_box: &crate::Box) -> anyhow::Result<SampleTables> 
                     crate::registry::StructuredData::ChunkOffset64(data) => {
                         tables.co64 = Some(data.clone());
                     }
-                    // MediaHeader, HandlerReference, and TrackHeader are not sample table data, ignore them
-                    crate::registry::StructuredData::MediaHeader(_) => {}
-                    crate::registry::StructuredData::HandlerReference(_) => {}
-                    crate::registry::StructuredData::TrackHeader(_) => {}
-                    crate::registry::StructuredData::TrackFragmentRun(_) => {}
+                    // Headers, fragment boxes, etc. are not sample table data
+                    _ => {}
                 }
             }
         }

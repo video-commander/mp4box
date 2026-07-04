@@ -153,7 +153,7 @@ fn elst_v0_decodes_first_entry() {
 }
 
 #[test]
-fn sidx_v0_decodes_summary() {
+fn sidx_v0_decodes_summary_and_references() {
     let mut p = Vec::new();
     p.extend_from_slice(&1u32.to_be_bytes()); // reference_ID
     p.extend_from_slice(&48000u32.to_be_bytes()); // timescale
@@ -161,13 +161,28 @@ fn sidx_v0_decodes_summary() {
     p.extend_from_slice(&0u32.to_be_bytes()); // first_offset
     p.extend_from_slice(&0u16.to_be_bytes()); // reserved
     p.extend_from_slice(&3u16.to_be_bytes()); // reference_count
+    for i in 0..3u32 {
+        p.extend_from_slice(&(1000 + i).to_be_bytes()); // type=0 + referenced_size
+        p.extend_from_slice(&48000u32.to_be_bytes()); // subsegment_duration
+        p.extend_from_slice(&0x9000_0000u32.to_be_bytes()); // starts_with_sap, sap_type=1
+    }
     let data = full_box(b"sidx", 0, 0, &p);
     let boxes = parse(&data);
-    let decoded = find(&boxes, "sidx").decoded.as_deref().unwrap();
+    let sidx = find(&boxes, "sidx");
     assert_eq!(
-        decoded,
-        "timescale=48000 earliest_presentation_time=96000 first_offset=0 references=3"
+        sidx.decoded.as_deref(),
+        Some("timescale=48000 earliest_presentation_time=96000 first_offset=0 references=3")
     );
+    let Some(StructuredData::SegmentIndex(d)) = &sidx.structured_data else {
+        panic!("expected structured sidx");
+    };
+    assert_eq!(d.reference_id, 1);
+    assert_eq!(d.references.len(), 3);
+    assert_eq!(d.references[0].referenced_size, 1000);
+    assert_eq!(d.references[2].referenced_size, 1002);
+    assert!(d.references[0].starts_with_sap);
+    assert_eq!(d.references[0].sap_type, 1);
+    assert_eq!(d.references[0].subsegment_duration, 48000);
 }
 
 // ---------- mdhd ----------

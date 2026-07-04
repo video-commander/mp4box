@@ -179,10 +179,7 @@ fn decode_value<R: Read + Seek>(
         match res {
             Ok(BoxValue::Text(s)) => (Some(s), None),
             Ok(BoxValue::Bytes(bytes)) => (Some(format!("{} bytes", bytes.len())), None),
-            Ok(BoxValue::Structured(data)) => {
-                let debug_str = format!("structured: {:?}", data);
-                (Some(debug_str), Some(data))
-            }
+            Ok(BoxValue::Structured(data)) => (Some(data.summary()), Some(data)),
             Err(e) => (Some(format!("[decode error: {}]", e)), None),
         }
     } else {

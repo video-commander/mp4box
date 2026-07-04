@@ -128,17 +128,24 @@ fn parse_moov(b: &Box, info: &mut MediaInfo) {
     };
 
     // mvhd for overall movie duration
-    if let Some(mvhd) = children.iter().find(|c| c.typ == "mvhd")
-        && let Some(decoded) = &mvhd.decoded
-    {
-        // Example: "timescale=600000 duration=65536"
-        if let Some(ts) = parse_u32_field(decoded, "timescale=") {
-            info.movie_timescale = Some(ts);
+    if let Some(mvhd) = children.iter().find(|c| c.typ == "mvhd") {
+        if let Some(mp4box::registry::StructuredData::MovieHeader(d)) = &mvhd.structured_data {
+            info.movie_timescale = Some(d.timescale);
+            info.movie_duration_ticks = Some(d.duration);
+            if d.timescale > 0 {
+                info.movie_duration_seconds = Some(d.duration as f64 / d.timescale as f64);
+            }
         }
-        if let Some(dur) = parse_u64_field(decoded, "duration=") {
-            info.movie_duration_ticks = Some(dur);
-            if let Some(ts) = info.movie_timescale {
-                info.movie_duration_seconds = Some(dur as f64 / ts as f64);
+        // Fallback to text parsing
+        else if let Some(decoded) = &mvhd.decoded {
+            if let Some(ts) = parse_u32_field(decoded, "timescale=") {
+                info.movie_timescale = Some(ts);
+            }
+            if let Some(dur) = parse_u64_field(decoded, "duration=") {
+                info.movie_duration_ticks = Some(dur);
+                if let Some(ts) = info.movie_timescale {
+                    info.movie_duration_seconds = Some(dur as f64 / ts as f64);
+                }
             }
         }
     }

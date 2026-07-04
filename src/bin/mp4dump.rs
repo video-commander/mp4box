@@ -3,7 +3,7 @@ use mp4box::{
     boxes::{BoxKey, BoxRef, FourCC, NodeKind},
     known_boxes::KnownBox,
     parser::parse_boxes,
-    registry::{BoxValue, Registry, StructuredData, default_registry},
+    registry::{BoxValue, Registry, default_registry},
     util::{hex_dump, read_slice},
 };
 use serde::Serialize;
@@ -210,92 +210,6 @@ fn payload_region(b: &BoxRef) -> Option<(BoxKey, u64, u64)> {
     }
 }
 
-fn format_structured(data: &StructuredData) -> String {
-    use mp4box::registry::*;
-    match data {
-        StructuredData::TrackHeader(d) => format!(
-            "track_id={} duration={} width={} height={} flags=0x{:06X}",
-            d.track_id, d.duration, d.width, d.height, d.flags
-        ),
-        StructuredData::MediaHeader(d) => format!(
-            "timescale={} duration={} language={}",
-            d.timescale, d.duration, d.language
-        ),
-        StructuredData::HandlerReference(d) => {
-            format!("handler_type={} name={:?}", d.handler_type, d.name)
-        }
-        StructuredData::SampleDescription(d) => {
-            let e = d.entries.first();
-            match e {
-                Some(e) => {
-                    let mut s = format!("codec={}", e.codec);
-                    if let (Some(w), Some(h)) = (e.width, e.height) {
-                        s.push_str(&format!(" {}x{}", w, h));
-                    }
-                    if let Some(ch) = e.channel_count {
-                        s.push_str(&format!(" channels={}", ch));
-                    }
-                    if let Some(sr) = e.sample_rate {
-                        s.push_str(&format!(" sample_rate={}", sr));
-                    }
-                    if let Some(bits) = e.sample_size {
-                        s.push_str(&format!(" bits={}", bits));
-                    }
-                    s.push_str(&format!(" entries={}", d.entry_count));
-                    s
-                }
-                None => "entries=0".to_string(),
-            }
-        }
-        StructuredData::DecodingTimeToSample(d) => {
-            let summary: Vec<String> = d
-                .entries
-                .iter()
-                .take(4)
-                .map(|e| format!("{}×{}", e.sample_count, e.sample_delta))
-                .collect();
-            let ellipsis = if d.entry_count > 4 { ", …" } else { "" };
-            format!(
-                "entries={} [{}{}]",
-                d.entry_count,
-                summary.join(", "),
-                ellipsis
-            )
-        }
-        StructuredData::CompositionTimeToSample(d) => format!("entries={}", d.entry_count),
-        StructuredData::SampleToChunk(d) => format!("entries={}", d.entry_count),
-        StructuredData::SampleSize(d) => {
-            if d.sample_size > 0 {
-                format!("fixed_size={} count={}", d.sample_size, d.sample_count)
-            } else {
-                format!("variable count={}", d.sample_count)
-            }
-        }
-        StructuredData::SyncSample(d) => format!("keyframes={}", d.entry_count),
-        StructuredData::ChunkOffset(d) => format!("chunks={}", d.entry_count),
-        StructuredData::ChunkOffset64(d) => format!("chunks={}", d.entry_count),
-        StructuredData::TrackFragmentRun(d) => {
-            let mut parts = vec![format!("samples={}", d.sample_count)];
-            if let Some(off) = d.data_offset {
-                parts.push(format!("data_offset={}", off));
-            }
-            let has_dur = d.flags & 0x100 != 0;
-            let has_size = d.flags & 0x200 != 0;
-            if (has_dur || has_size)
-                && let Some(first) = d.samples.first()
-            {
-                if let Some(dur) = first.duration {
-                    parts.push(format!("first_dur={}", dur));
-                }
-                if let Some(sz) = first.size {
-                    parts.push(format!("first_size={}", sz));
-                }
-            }
-            parts.join(" ")
-        }
-    }
-}
-
 fn decode_value(f: &mut File, b: &BoxRef, reg: &Registry) -> Option<String> {
     let (key, off, len) = payload_region(b)?;
     if len == 0 {
@@ -320,7 +234,7 @@ fn decode_value(f: &mut File, b: &BoxRef, reg: &Registry) -> Option<String> {
         match res {
             Ok(BoxValue::Text(s)) => Some(s),
             Ok(BoxValue::Bytes(bytes)) => Some(format!("{} bytes", bytes.len())),
-            Ok(BoxValue::Structured(data)) => Some(format_structured(&data)),
+            Ok(BoxValue::Structured(data)) => Some(data.summary()),
             Err(e) => Some(format!("[decode error: {}]", e)),
         }
     } else {
