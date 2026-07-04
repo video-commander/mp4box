@@ -56,8 +56,19 @@ pub struct SampleEntry {
     pub size: u32,
     pub codec: String,
     pub data_reference_index: u16,
+    /// Video: frame width in pixels
     pub width: Option<u16>,
+    /// Video: frame height in pixels
     pub height: Option<u16>,
+    /// Audio: channel count
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub channel_count: Option<u16>,
+    /// Audio: bits per sample
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sample_size: Option<u16>,
+    /// Audio: sample rate in Hz (integer part of the 16.16 fixed-point field)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sample_rate: Option<u32>,
 }
 
 /// Decoding Time-to-Sample Box data
@@ -148,10 +159,10 @@ pub struct Co64Data {
 pub struct MdhdData {
     pub version: u8,
     pub flags: u32,
-    pub creation_time: u32,
-    pub modification_time: u32,
+    pub creation_time: u64,
+    pub modification_time: u64,
     pub timescale: u32,
-    pub duration: u32,
+    pub duration: u64,
     pub language: String,
 }
 
@@ -334,30 +345,22 @@ impl BoxDecoder for MvhdDecoder {
         &self,
         r: &mut dyn Read,
         _hdr: &BoxHeader,
-        _version: Option<u8>,
+        version: Option<u8>,
         _flags: Option<u32>,
     ) -> anyhow::Result<BoxValue> {
-        let buf = read_all(r)?;
-        let mut cur = Cursor::new(&buf);
-
-        let version = cur.read_u8()?;
-        let _flags = {
-            let mut f = [0u8; 3];
-            cur.read_exact(&mut f)?;
-            ((f[0] as u32) << 16) | ((f[1] as u32) << 8) | (f[2] as u32)
-        };
-
-        let (timescale, duration) = if version == 1 {
-            let _creation = cur.read_u64::<BigEndian>()?;
-            let _mod = cur.read_u64::<BigEndian>()?;
-            let ts = cur.read_u32::<BigEndian>()?;
-            let dur = cur.read_u64::<BigEndian>()?;
-            (ts, dur as u64)
+        // mvhd is a FullBox: version/flags are stripped by the parser and
+        // passed in, so the payload starts at creation_time.
+        let (timescale, duration) = if version.unwrap_or(0) == 1 {
+            let _creation = r.read_u64::<BigEndian>()?;
+            let _mod = r.read_u64::<BigEndian>()?;
+            let ts = r.read_u32::<BigEndian>()?;
+            let dur = r.read_u64::<BigEndian>()?;
+            (ts, dur)
         } else {
-            let _creation = cur.read_u32::<BigEndian>()?;
-            let _mod = cur.read_u32::<BigEndian>()?;
-            let ts = cur.read_u32::<BigEndian>()?;
-            let dur = cur.read_u32::<BigEndian>()? as u64;
+            let _creation = r.read_u32::<BigEndian>()?;
+            let _mod = r.read_u32::<BigEndian>()?;
+            let ts = r.read_u32::<BigEndian>()?;
+            let dur = r.read_u32::<BigEndian>()? as u64;
             (ts, dur)
         };
 
@@ -376,111 +379,64 @@ impl BoxDecoder for TkhdDecoder {
         &self,
         r: &mut dyn Read,
         _hdr: &BoxHeader,
-        _version: Option<u8>,
-        _flags: Option<u32>,
+        version: Option<u8>,
+        flags: Option<u32>,
     ) -> anyhow::Result<BoxValue> {
+        // tkhd is a FullBox: version/flags are stripped by the parser and
+        // passed in, so the payload starts at creation_time.
         let buf = read_all(r)?;
-        if buf.len() < 4 {
-            return Ok(BoxValue::Text(format!(
-                "tkhd: payload too short ({} bytes)",
-                buf.len()
-            )));
-        }
-
+        let version = version.unwrap_or(0);
         let mut pos = 0usize;
-        let version = buf[pos];
-        pos += 1;
-        if pos + 3 > buf.len() {
-            return Ok(BoxValue::Text("tkhd: truncated flags".into()));
-        }
-
-        // Extract flags as a 24-bit big-endian value
-        let flags_bytes = [0, buf[pos], buf[pos + 1], buf[pos + 2]];
-        let flags_value = u32::from_be_bytes(flags_bytes);
-        pos += 3;
 
         let read_u32 = |pos: &mut usize| -> Option<u32> {
-            if *pos + 4 > buf.len() {
-                return None;
-            }
-            let v = u32::from_be_bytes(buf[*pos..*pos + 4].try_into().unwrap());
+            let v = u32::from_be_bytes(buf.get(*pos..*pos + 4)?.try_into().unwrap());
             *pos += 4;
             Some(v)
         };
         let read_u64 = |pos: &mut usize| -> Option<u64> {
-            if *pos + 8 > buf.len() {
-                return None;
-            }
-            let v = u64::from_be_bytes(buf[*pos..*pos + 8].try_into().unwrap());
+            let v = u64::from_be_bytes(buf.get(*pos..*pos + 8)?.try_into().unwrap());
             *pos += 8;
             Some(v)
         };
 
-        let track_id;
-        let duration;
-
-        if version == 1 {
+        let (track_id, duration) = if version == 1 {
             // creation_time (8), modification_time (8), track_id (4), reserved (4), duration (8)
             if read_u64(&mut pos).is_none() || read_u64(&mut pos).is_none() {
                 return Ok(BoxValue::Text(
                     "tkhd: truncated creation/modification".into(),
                 ));
             }
-            track_id = read_u32(&mut pos).unwrap_or(0);
+            let id = read_u32(&mut pos).unwrap_or(0);
             let _ = read_u32(&mut pos); // reserved
-            duration = read_u64(&mut pos).unwrap_or(0);
-            eprintln!(
-                "DEBUG tkhd v1: track_id={}, duration={}",
-                track_id, duration
-            );
+            (id, read_u64(&mut pos).unwrap_or(0))
         } else {
-            // For version 0, read two 8-byte timestamps then the fields
-            let _creation_time = read_u64(&mut pos).unwrap_or(0);
-            let _modification_time = read_u64(&mut pos).unwrap_or(0);
+            // creation_time (4), modification_time (4), track_id (4), reserved (4), duration (4)
+            if read_u32(&mut pos).is_none() || read_u32(&mut pos).is_none() {
+                return Ok(BoxValue::Text(
+                    "tkhd: truncated creation/modification".into(),
+                ));
+            }
+            let id = read_u32(&mut pos).unwrap_or(0);
+            let _ = read_u32(&mut pos); // reserved
+            (id, read_u32(&mut pos).unwrap_or(0) as u64)
+        };
 
-            track_id = read_u32(&mut pos).unwrap_or(0);
-            let _reserved = read_u32(&mut pos).unwrap_or(0);
-            duration = read_u32(&mut pos).unwrap_or(0) as u64;
-        }
+        // reserved[2] (8) + layer/alternate_group/volume/reserved (8) + matrix (36)
+        pos += 8 + 8 + 36;
 
-        // reserved[2]
-        for _ in 0..2 {
-            let _ = read_u32(&mut pos);
-        }
-
-        // layer/alt_group/volume/reserved (8 bytes)
-        if pos + 8 <= buf.len() {
-            pos += 8;
-        } else {
-            // we still have track/duration, just don't try width/height
-            return Ok(BoxValue::Text(format!(
-                "track_id={} duration={} (no width/height, short payload)",
-                track_id, duration
-            )));
-        }
-
-        // matrix (36 bytes)
-        if pos + 36 <= buf.len() {
-            pos += 36;
-        } else {
-            return Ok(BoxValue::Text(format!(
-                "track_id={} duration={} (no width/height, short payload)",
-                track_id, duration
-            )));
-        }
-
-        // width / height
-        let (width, height) = if pos + 8 <= buf.len() {
-            let width = u32::from_be_bytes(buf[pos..pos + 4].try_into().unwrap());
-            let height = u32::from_be_bytes(buf[pos + 4..pos + 8].try_into().unwrap());
-            (width as f32 / 65536.0, height as f32 / 65536.0)
-        } else {
-            (0.0, 0.0)
+        // width / height as 16.16 fixed point
+        let (width, height) = {
+            let w = read_u32(&mut pos);
+            let h = read_u32(&mut pos);
+            match (w, h) {
+                (Some(w), Some(h)) => (w as f32 / 65536.0, h as f32 / 65536.0),
+                _ => (0.0, 0.0),
+            }
         };
 
         let data = TkhdData {
             version,
-            flags: flags_value,
+            flags: flags.unwrap_or(0),
             track_id,
             duration,
             width,
@@ -502,17 +458,27 @@ impl BoxDecoder for MdhdDecoder {
         version: Option<u8>,
         flags: Option<u32>,
     ) -> anyhow::Result<BoxValue> {
-        let creation_time = r.read_u32::<BigEndian>()?;
-        let modification_time = r.read_u32::<BigEndian>()?;
-        let timescale = r.read_u32::<BigEndian>()?;
-        let duration = r.read_u32::<BigEndian>()?;
+        let version = version.unwrap_or(0);
+        let (creation_time, modification_time, timescale, duration) = if version == 1 {
+            let creation = r.read_u64::<BigEndian>()?;
+            let modification = r.read_u64::<BigEndian>()?;
+            let ts = r.read_u32::<BigEndian>()?;
+            let dur = r.read_u64::<BigEndian>()?;
+            (creation, modification, ts, dur)
+        } else {
+            let creation = r.read_u32::<BigEndian>()? as u64;
+            let modification = r.read_u32::<BigEndian>()? as u64;
+            let ts = r.read_u32::<BigEndian>()?;
+            let dur = r.read_u32::<BigEndian>()? as u64;
+            (creation, modification, ts, dur)
+        };
         let language_code = r.read_u16::<BigEndian>()?;
         let _pre_defined = r.read_u16::<BigEndian>()?;
 
         let lang = lang_from_u16(language_code);
 
         let data = MdhdData {
-            version: version.unwrap_or(0),
+            version,
             flags: flags.unwrap_or(0),
             creation_time,
             modification_time,
@@ -577,34 +543,26 @@ impl BoxDecoder for SidxDecoder {
         &self,
         r: &mut dyn Read,
         _hdr: &BoxHeader,
-        _version: Option<u8>,
+        version: Option<u8>,
         _flags: Option<u32>,
     ) -> anyhow::Result<BoxValue> {
-        let buf = read_all(r)?;
-        let mut cur = Cursor::new(&buf);
+        // sidx is a FullBox: version/flags are stripped by the parser and
+        // passed in, so the payload starts at reference_ID.
+        let _ref_id = r.read_u32::<BigEndian>()?;
+        let timescale = r.read_u32::<BigEndian>()?;
 
-        let version = cur.read_u8()?;
-        let _flags = {
-            let mut f = [0u8; 3];
-            cur.read_exact(&mut f)?;
-            ((f[0] as u32) << 16) | ((f[1] as u32) << 8) | (f[2] as u32)
-        };
-
-        let _ref_id = cur.read_u32::<BigEndian>()?;
-        let timescale = cur.read_u32::<BigEndian>()?;
-
-        let (earliest, first_offset) = if version == 1 {
-            let earliest = cur.read_u64::<BigEndian>()?;
-            let first = cur.read_u64::<BigEndian>()?;
+        let (earliest, first_offset) = if version.unwrap_or(0) == 1 {
+            let earliest = r.read_u64::<BigEndian>()?;
+            let first = r.read_u64::<BigEndian>()?;
             (earliest, first)
         } else {
-            let earliest = cur.read_u32::<BigEndian>()? as u64;
-            let first = cur.read_u32::<BigEndian>()? as u64;
+            let earliest = r.read_u32::<BigEndian>()? as u64;
+            let first = r.read_u32::<BigEndian>()? as u64;
             (earliest, first)
         };
 
-        let _reserved = cur.read_u16::<BigEndian>()?;
-        let ref_count = cur.read_u16::<BigEndian>()?;
+        let _reserved = r.read_u16::<BigEndian>()?;
+        let ref_count = r.read_u16::<BigEndian>()?;
 
         Ok(BoxValue::Text(format!(
             "timescale={} earliest_presentation_time={} first_offset={} references={}",
@@ -617,83 +575,132 @@ impl BoxDecoder for SidxDecoder {
 // ---- stsd decoder: codec + width/height for first entry -----------------
 pub struct StsdDecoder;
 
+/// Codec families that share a fixed sample-entry field layout.
+fn is_visual_sample_entry(codec: &[u8; 4]) -> bool {
+    matches!(
+        codec,
+        b"avc1"
+            | b"avc2"
+            | b"avc3"
+            | b"avc4"
+            | b"hev1"
+            | b"hvc1"
+            | b"vvc1"
+            | b"mp4v"
+            | b"vp08"
+            | b"vp09"
+            | b"av01"
+            | b"dvh1"
+            | b"dvhe"
+            | b"dav1"
+            | b"encv"
+    )
+}
+
+fn is_audio_sample_entry(codec: &[u8; 4]) -> bool {
+    matches!(
+        codec,
+        b"mp4a"
+            | b"ac-3"
+            | b"ec-3"
+            | b"Opus"
+            | b"opus"
+            | b"samr"
+            | b"sawb"
+            | b"alac"
+            | b"fLaC"
+            | b"enca"
+            | b"ipcm"
+            | b"fpcm"
+    )
+}
+
 impl BoxDecoder for StsdDecoder {
     fn decode(
         &self,
         r: &mut dyn Read,
         _hdr: &BoxHeader,
-        _version: Option<u8>,
-        _flags: Option<u32>,
+        version: Option<u8>,
+        flags: Option<u32>,
     ) -> anyhow::Result<BoxValue> {
-        use byteorder::{BigEndian, ReadBytesExt};
+        // stsd is a FullBox; the payload starts at entry_count, followed by
+        // sample entry boxes.
+        let buf = read_all(r)?;
+        let mut cur = Cursor::new(&buf);
 
-        // stsd is a FullBox; our reader is already positioned at payload:
-        // u32 entry_count
-        // [ SampleEntry entries... ]
+        let entry_count = cur.read_u32::<BigEndian>()?;
+        let mut entries = Vec::new();
 
-        let entry_count = r.read_u32::<BigEndian>()?;
-        if entry_count == 0 {
-            return Ok(BoxValue::Text("entry_count=0".to_string()));
-        }
+        for _ in 0..entry_count {
+            let entry_start = cur.position();
+            if entry_start + 8 > buf.len() as u64 {
+                break;
+            }
+            let entry_size = cur.read_u32::<BigEndian>()?;
 
-        // First sample entry only (good enough for mp4info-like summary)
-        let entry_size = r.read_u32::<BigEndian>()?;
+            let mut codec_bytes = [0u8; 4];
+            cur.read_exact(&mut codec_bytes)?;
+            let codec = codec_bytes
+                .iter()
+                .map(|&c| {
+                    if (0x20..=0x7e).contains(&c) {
+                        c as char
+                    } else {
+                        '.'
+                    }
+                })
+                .collect::<String>();
 
-        let mut codec_bytes = [0u8; 4];
-        r.read_exact(&mut codec_bytes)?;
-        let codec = std::str::from_utf8(&codec_bytes)
-            .unwrap_or("????")
-            .to_string();
+            // SampleEntry base: 6 reserved bytes + data_reference_index
+            let mut reserved = [0u8; 6];
+            cur.read_exact(&mut reserved)?;
+            let data_reference_index = cur.read_u16::<BigEndian>()?;
 
-        // Now we’re at SampleEntry fields.
-        // For visual sample entries (avc1/hvc1/etc.), layout is:
-        //
-        // 6 reserved bytes
-        // u16 data_reference_index
-        // 16 bytes pre_defined / reserved
-        // u16 width
-        // u16 height
-        //
-        // For audio sample entries, this layout is different, so we only
-        // try to read width/height for known video codecs.
-        let visual_codecs = ["avc1", "hvc1", "hev1", "vp09", "av01"];
-
-        let mut width: Option<u32> = None;
-        let mut height: Option<u32> = None;
-
-        if visual_codecs.contains(&codec.as_str()) {
-            // Skip reserved + data_reference_index
-            let mut skip = [0u8; 6 + 2 + 16];
-            r.read_exact(&mut skip)?;
-
-            let w = r.read_u16::<BigEndian>()?;
-            let h = r.read_u16::<BigEndian>()?;
-            width = Some(w as u32);
-            height = Some(h as u32);
-        }
-
-        let mut parts = Vec::new();
-        parts.push(format!("entry_count={}", entry_count));
-        parts.push(format!("codec={}", codec));
-        if let Some(w) = width {
-            parts.push(format!("width={}", w));
-        }
-        if let Some(h) = height {
-            parts.push(format!("height={}", h));
-        }
-
-        // Create structured data
-        let data = StsdData {
-            version: _version.unwrap_or(0),
-            flags: _flags.unwrap_or(0),
-            entry_count,
-            entries: vec![SampleEntry {
+            let mut entry = SampleEntry {
                 size: entry_size,
                 codec,
-                data_reference_index: 1, // Default value
-                width: width.map(|w| w as u16),
-                height: height.map(|h| h as u16),
-            }],
+                data_reference_index,
+                width: None,
+                height: None,
+                channel_count: None,
+                sample_size: None,
+                sample_rate: None,
+            };
+
+            if is_visual_sample_entry(&codec_bytes) {
+                // pre_defined (2) + reserved (2) + pre_defined (12), then
+                // width and height
+                let mut skip = [0u8; 16];
+                cur.read_exact(&mut skip)?;
+                entry.width = Some(cur.read_u16::<BigEndian>()?);
+                entry.height = Some(cur.read_u16::<BigEndian>()?);
+            } else if is_audio_sample_entry(&codec_bytes) {
+                // version (2) + revision (2) + vendor (4), then channelcount,
+                // samplesize, pre_defined (2), reserved (2), samplerate (16.16)
+                let mut skip = [0u8; 8];
+                cur.read_exact(&mut skip)?;
+                entry.channel_count = Some(cur.read_u16::<BigEndian>()?);
+                entry.sample_size = Some(cur.read_u16::<BigEndian>()?);
+                let mut skip = [0u8; 4];
+                cur.read_exact(&mut skip)?;
+                entry.sample_rate = Some(cur.read_u32::<BigEndian>()? >> 16);
+            }
+
+            entries.push(entry);
+
+            // Jump to the next entry regardless of how much we understood.
+            if entry_size >= 8 {
+                cur.set_position(entry_start + entry_size as u64);
+            } else {
+                break; // size 0/invalid: cannot locate further entries
+            }
+        }
+
+        let data = StsdData {
+            version: version.unwrap_or(0),
+            flags: flags.unwrap_or(0),
+            entry_count,
+            entries,
         };
 
         Ok(BoxValue::Structured(StructuredData::SampleDescription(
@@ -896,6 +903,66 @@ impl BoxDecoder for StszDecoder {
     }
 }
 
+// stz2: compact sample sizes (4-, 8-, or 16-bit fields)
+pub struct Stz2Decoder;
+
+impl BoxDecoder for Stz2Decoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        version: Option<u8>,
+        flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let buf = read_all(r)?;
+        let mut cur = Cursor::new(&buf);
+
+        // reserved (3 bytes) + field_size (1 byte)
+        let mut reserved = [0u8; 3];
+        cur.read_exact(&mut reserved)?;
+        let field_size = cur.read_u8()?;
+        let sample_count = cur.read_u32::<BigEndian>()?;
+
+        let mut sample_sizes = Vec::with_capacity(sample_count as usize);
+        match field_size {
+            4 => {
+                let mut remaining = sample_count;
+                while remaining > 0 {
+                    let byte = cur.read_u8()?;
+                    sample_sizes.push((byte >> 4) as u32);
+                    remaining -= 1;
+                    if remaining > 0 {
+                        sample_sizes.push((byte & 0x0F) as u32);
+                        remaining -= 1;
+                    }
+                }
+            }
+            8 => {
+                for _ in 0..sample_count {
+                    sample_sizes.push(cur.read_u8()? as u32);
+                }
+            }
+            16 => {
+                for _ in 0..sample_count {
+                    sample_sizes.push(cur.read_u16::<BigEndian>()? as u32);
+                }
+            }
+            other => anyhow::bail!("stz2: invalid field_size {}", other),
+        }
+
+        // Reuse the stsz shape: sample_size == 0 means per-sample sizes.
+        let data = StszData {
+            version: version.unwrap_or(0),
+            flags: flags.unwrap_or(0),
+            sample_size: 0,
+            sample_count,
+            sample_sizes,
+        };
+
+        Ok(BoxValue::Structured(StructuredData::SampleSize(data)))
+    }
+}
+
 // stco: 32-bit chunk offsets
 pub struct StcoDecoder;
 
@@ -970,24 +1037,21 @@ impl BoxDecoder for ElstDecoder {
         &self,
         r: &mut dyn Read,
         _hdr: &BoxHeader,
-        _version: Option<u8>,
+        version: Option<u8>,
         _flags: Option<u32>,
     ) -> anyhow::Result<BoxValue> {
+        // elst is a FullBox: version/flags are stripped by the parser and
+        // passed in, so the payload starts at entry_count.
         let buf = read_all(r)?;
-        if buf.len() < 8 {
+        if buf.len() < 4 {
             return Ok(BoxValue::Text(format!(
                 "elst: payload too short ({} bytes)",
                 buf.len()
             )));
         }
 
+        let version = version.unwrap_or(0);
         let mut pos = 0usize;
-        let version = buf[pos];
-        pos += 1;
-        if pos + 3 > buf.len() {
-            return Ok(BoxValue::Text("elst: truncated flags".into()));
-        }
-        pos += 3;
 
         let read_u32 = |pos: &mut usize| -> Option<u32> {
             if *pos + 4 > buf.len() {
@@ -1192,6 +1256,71 @@ impl BoxDecoder for EsdsDecoder {
         Ok(BoxValue::Text(format!(
             "objectType=0x{:02X} ({}) max_bitrate={} avg_bitrate={}",
             object_type, type_name, max_bitrate, avg_bitrate
+        )))
+    }
+}
+
+// avcC: AVC decoder configuration record
+pub struct AvccDecoder;
+
+impl BoxDecoder for AvccDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let buf = read_all(r)?;
+        if buf.len() < 5 {
+            return Ok(BoxValue::Bytes(buf));
+        }
+        let config_version = buf[0];
+        let profile = buf[1];
+        let profile_compat = buf[2];
+        let level = buf[3];
+        let nal_length_size = (buf[4] & 0x03) + 1;
+        Ok(BoxValue::Text(format!(
+            "configurationVersion={} profile={} compat=0x{:02X} level={}.{} nal_length_size={}",
+            config_version,
+            profile,
+            profile_compat,
+            level / 10,
+            level % 10,
+            nal_length_size
+        )))
+    }
+}
+
+// hvcC: HEVC decoder configuration record
+pub struct HvccDecoder;
+
+impl BoxDecoder for HvccDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let buf = read_all(r)?;
+        if buf.len() < 13 {
+            return Ok(BoxValue::Bytes(buf));
+        }
+        let config_version = buf[0];
+        let profile_space = (buf[1] >> 6) & 0x03;
+        let tier = (buf[1] >> 5) & 0x01;
+        let profile_idc = buf[1] & 0x1F;
+        let level_idc = buf[12];
+        Ok(BoxValue::Text(format!(
+            "configurationVersion={} profile_space={} tier={} profile_idc={} level_idc={} ({}.{})",
+            config_version,
+            profile_space,
+            if tier == 1 { "high" } else { "main" },
+            profile_idc,
+            level_idc,
+            level_idc / 30,
+            (level_idc % 30) / 3
         )))
     }
 }
@@ -1909,6 +2038,11 @@ pub fn default_registry() -> Registry {
             Box::new(StszDecoder),
         )
         .with_decoder(
+            BoxKey::FourCC(FourCC(*b"stz2")),
+            "stz2",
+            Box::new(Stz2Decoder),
+        )
+        .with_decoder(
             BoxKey::FourCC(FourCC(*b"stco")),
             "stco",
             Box::new(StcoDecoder),
@@ -1932,6 +2066,16 @@ pub fn default_registry() -> Registry {
             BoxKey::FourCC(FourCC(*b"esds")),
             "esds",
             Box::new(EsdsDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"avcC")),
+            "avcC",
+            Box::new(AvccDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"hvcC")),
+            "hvcC",
+            Box::new(HvccDecoder),
         )
         .with_decoder(
             BoxKey::FourCC(FourCC(*b"av1C")),

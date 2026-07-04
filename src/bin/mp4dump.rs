@@ -1,9 +1,8 @@
 use clap::{ArgAction, Parser};
 use mp4box::{
-    BoxHeader,
     boxes::{BoxKey, BoxRef, FourCC, NodeKind},
     known_boxes::KnownBox,
-    parser::{parse_children, read_box_header},
+    parser::parse_boxes,
     registry::{BoxValue, Registry, StructuredData, default_registry},
     util::{hex_dump, read_slice},
 };
@@ -47,55 +46,7 @@ fn main() -> anyhow::Result<()> {
     let mut f = File::open(&args.path)?;
 
     let file_len = f.metadata()?.len();
-    let top = {
-        // Top-level loop
-        let mut kids = Vec::new();
-        while f.stream_position()? < file_len {
-            let h = read_box_header(&mut f)?;
-            let box_end = if h.size == 0 {
-                file_len
-            } else {
-                h.start + h.size
-            };
-
-            let kind = if is_container(&h) {
-                f.seek(SeekFrom::Start(h.start + h.header_size))?;
-                NodeKind::Container(parse_children(&mut f, box_end)?)
-            } else if is_full_box(&h) {
-                f.seek(SeekFrom::Start(h.start + h.header_size))?;
-                use byteorder::ReadBytesExt;
-                let version = f.read_u8()?;
-                let mut fl = [0u8; 3];
-                f.read_exact(&mut fl)?;
-                let flags = ((fl[0] as u32) << 16) | ((fl[1] as u32) << 8) | (fl[2] as u32);
-                let data_offset = f.stream_position()?;
-                let data_len = box_end.saturating_sub(data_offset);
-                NodeKind::FullBox {
-                    version,
-                    flags,
-                    data_offset,
-                    data_len,
-                }
-            } else {
-                let data_offset = h.start + h.header_size;
-                let data_len = box_end.saturating_sub(data_offset);
-                if &h.typ.0 == b"uuid" {
-                    NodeKind::Unknown {
-                        data_offset,
-                        data_len,
-                    }
-                } else {
-                    NodeKind::Leaf {
-                        data_offset,
-                        data_len,
-                    }
-                }
-            };
-            f.seek(SeekFrom::Start(box_end))?;
-            kids.push(BoxRef { hdr: h, kind });
-        }
-        kids
-    };
+    let top = parse_boxes(&mut f, 0, file_len)?;
 
     let reg = default_registry();
 
@@ -167,6 +118,29 @@ fn print_box(
                 maybe_decode(f, b, reg)?;
             }
         }
+        NodeKind::FullContainer {
+            version,
+            flags,
+            children,
+            ..
+        } => {
+            println!(
+                "{indent}{:>6} {:>10} {} (container, ver={}, flags=0x{:06x})",
+                format!("{:#x}", hdr.start),
+                hdr.size,
+                display_type(hdr),
+                version,
+                flags
+            );
+            if decode {
+                maybe_decode(f, b, reg)?;
+            }
+            if depth < max_depth {
+                for c in children {
+                    print_box(f, c, depth + 1, max_depth, decode, reg)?;
+                }
+            }
+        }
         NodeKind::Container(children) => {
             println!(
                 "{indent}{:>6} {:>10} {} (container)",
@@ -214,6 +188,11 @@ fn payload_region(b: &BoxRef) -> Option<(BoxKey, u64, u64)> {
             data_offset,
             data_len,
             ..
+        }
+        | NodeKind::FullContainer {
+            data_offset,
+            data_len,
+            ..
         } => Some((key, *data_offset, *data_len)),
         NodeKind::Leaf { .. } | NodeKind::Unknown { .. } => {
             let hdr = &b.hdr;
@@ -248,12 +227,23 @@ fn format_structured(data: &StructuredData) -> String {
         StructuredData::SampleDescription(d) => {
             let e = d.entries.first();
             match e {
-                Some(e) => match (e.width, e.height) {
-                    (Some(w), Some(h)) => {
-                        format!("codec={} {}x{} entries={}", e.codec, w, h, d.entry_count)
+                Some(e) => {
+                    let mut s = format!("codec={}", e.codec);
+                    if let (Some(w), Some(h)) = (e.width, e.height) {
+                        s.push_str(&format!(" {}x{}", w, h));
                     }
-                    _ => format!("codec={} entries={}", e.codec, d.entry_count),
-                },
+                    if let Some(ch) = e.channel_count {
+                        s.push_str(&format!(" channels={}", ch));
+                    }
+                    if let Some(sr) = e.sample_rate {
+                        s.push_str(&format!(" sample_rate={}", sr));
+                    }
+                    if let Some(bits) = e.sample_size {
+                        s.push_str(&format!(" bits={}", bits));
+                    }
+                    s.push_str(&format!(" entries={}", d.entry_count));
+                    s
+                }
                 None => "entries=0".to_string(),
             }
         }
@@ -319,7 +309,10 @@ fn decode_value(f: &mut File, b: &BoxRef, reg: &Registry) -> Option<String> {
 
     // Extract version and flags from the box if it's a FullBox
     let (version, flags) = match &b.kind {
-        mp4box::boxes::NodeKind::FullBox { version, flags, .. } => (Some(*version), Some(*flags)),
+        mp4box::boxes::NodeKind::FullBox { version, flags, .. }
+        | mp4box::boxes::NodeKind::FullContainer { version, flags, .. } => {
+            (Some(*version), Some(*flags))
+        }
         _ => (None, None),
     };
 
@@ -390,16 +383,17 @@ fn select_boxes(list: &[BoxRef], sel: &str, out: &mut Vec<(u64, u64, mp4box::box
                     data_offset,
                     data_len,
                     ..
-                } => {
-                    out.push((*data_offset, *data_len, b.hdr.clone()));
                 }
-                NodeKind::Leaf {
+                | NodeKind::FullContainer {
                     data_offset,
                     data_len,
-                } => {
-                    out.push((*data_offset, *data_len, b.hdr.clone()));
+                    ..
                 }
-                NodeKind::Unknown {
+                | NodeKind::Leaf {
+                    data_offset,
+                    data_len,
+                }
+                | NodeKind::Unknown {
                     data_offset,
                     data_len,
                 } => {
@@ -416,8 +410,11 @@ fn select_boxes(list: &[BoxRef], sel: &str, out: &mut Vec<(u64, u64, mp4box::box
             }
         }
 
-        if let NodeKind::Container(kids) = &b.kind {
-            select_boxes(kids, sel, out);
+        match &b.kind {
+            NodeKind::Container(kids) | NodeKind::FullContainer { children: kids, .. } => {
+                select_boxes(kids, sel, out);
+            }
+            _ => {}
         }
     }
 }
@@ -448,16 +445,20 @@ fn select_by_path<'a>(roots: &'a [BoxRef], path: &str) -> Vec<&'a BoxRef> {
         } else {
             // match in children of current set
             for b in &current {
-                if let NodeKind::Container(kids) = &b.kind {
-                    let mut matches: Vec<&BoxRef> =
-                        kids.iter().filter(|c| c.hdr.typ == fourcc).collect();
-                    if let Some(i) = idx {
-                        if i < matches.len() {
-                            next.push(matches[i]);
-                        }
-                    } else {
-                        next.append(&mut matches);
+                let kids = match &b.kind {
+                    NodeKind::Container(kids) | NodeKind::FullContainer { children: kids, .. } => {
+                        kids
                     }
+                    _ => continue,
+                };
+                let mut matches: Vec<&BoxRef> =
+                    kids.iter().filter(|c| c.hdr.typ == fourcc).collect();
+                if let Some(i) = idx {
+                    if i < matches.len() {
+                        next.push(matches[i]);
+                    }
+                } else {
+                    next.append(&mut matches);
                 }
             }
         }
@@ -511,6 +512,11 @@ fn payload_geometry(b: &BoxRef) -> Option<(u64, u64)> {
             data_offset,
             data_len,
             ..
+        }
+        | NodeKind::FullContainer {
+            data_offset,
+            data_len,
+            ..
         } => Some((*data_offset, *data_len)),
         NodeKind::Leaf { .. } | NodeKind::Unknown { .. } => {
             let hdr = &b.hdr;
@@ -555,6 +561,23 @@ fn build_json_for_box(f: &mut File, b: &BoxRef, decode: bool, reg: &Registry) ->
                 .collect();
             (None, None, "container".to_string(), Some(child_nodes))
         }
+        NodeKind::FullContainer {
+            version,
+            flags,
+            children: kids,
+            ..
+        } => {
+            let child_nodes = kids
+                .iter()
+                .map(|c| build_json_for_box(f, c, decode, reg))
+                .collect();
+            (
+                Some(*version),
+                Some(*flags),
+                "container".to_string(),
+                Some(child_nodes),
+            )
+        }
     };
 
     let decoded = if decode {
@@ -579,12 +602,4 @@ fn build_json_for_box(f: &mut File, b: &BoxRef, decode: bool, reg: &Registry) ->
         decoded,
         children,
     }
-}
-
-fn is_container(h: &BoxHeader) -> bool {
-    KnownBox::from(h.typ).is_container()
-}
-
-fn is_full_box(h: &BoxHeader) -> bool {
-    KnownBox::from(h.typ).is_full_box()
 }

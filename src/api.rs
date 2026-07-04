@@ -68,58 +68,20 @@ pub struct Box {
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn get_boxes<R: Read + Seek>(r: &mut R, size: u64, decode: bool) -> anyhow::Result<Vec<Box>> {
-    // let mut f = File::open(&path)?;
-    // let file_len = f.metadata()?.len();
+    get_boxes_with_registry(r, size, decode, &default_registry())
+}
 
-    // parse top-level boxes
-    let mut boxes = Vec::new();
-    while r.stream_position()? < size {
-        let h = read_box_header(r)?;
-        let box_end = if h.size == 0 { size } else { h.start + h.size };
+/// Like [`get_boxes`], but decodes with a caller-supplied [`Registry`]
+/// instead of the default one.
+pub fn get_boxes_with_registry<R: Read + Seek>(
+    r: &mut R,
+    size: u64,
+    decode: bool,
+    reg: &Registry,
+) -> anyhow::Result<Vec<Box>> {
+    let boxes = crate::parser::parse_boxes(r, 0, size)?;
 
-        let kind = if crate::known_boxes::KnownBox::from(h.typ).is_container() {
-            r.seek(SeekFrom::Start(h.start + h.header_size))?;
-            NodeKind::Container(crate::parser::parse_children(r, box_end)?)
-        } else if crate::known_boxes::KnownBox::from(h.typ).is_full_box() {
-            r.seek(SeekFrom::Start(h.start + h.header_size))?;
-            let version = r.read_u8()?;
-            let mut fl = [0u8; 3];
-            r.read_exact(&mut fl)?;
-            let flags = ((fl[0] as u32) << 16) | ((fl[1] as u32) << 8) | (fl[2] as u32);
-            let data_offset = r.stream_position()?;
-            let data_len = box_end.saturating_sub(data_offset);
-            NodeKind::FullBox {
-                version,
-                flags,
-                data_offset,
-                data_len,
-            }
-        } else {
-            let data_offset = h.start + h.header_size;
-            let data_len = box_end.saturating_sub(data_offset);
-            if &h.typ.0 == b"uuid" {
-                NodeKind::Unknown {
-                    data_offset,
-                    data_len,
-                }
-            } else {
-                NodeKind::Leaf {
-                    data_offset,
-                    data_len,
-                }
-            }
-        };
-
-        r.seek(SeekFrom::Start(box_end))?;
-        boxes.push(BoxRef { hdr: h, kind });
-    }
-
-    // build JSON tree
-    let reg = default_registry();
-    let json_boxes = boxes
-        .iter()
-        .map(|b| build_box(r, b, decode, &reg))
-        .collect();
+    let json_boxes = boxes.iter().map(|b| build_box(r, b, decode, reg)).collect();
 
     Ok(json_boxes)
 }
@@ -133,6 +95,11 @@ fn payload_region(b: &BoxRef) -> Option<(crate::boxes::BoxKey, u64, u64)> {
 
     match &b.kind {
         NodeKind::FullBox {
+            data_offset,
+            data_len,
+            ..
+        }
+        | NodeKind::FullContainer {
             data_offset,
             data_len,
             ..
@@ -156,6 +123,11 @@ fn payload_region(b: &BoxRef) -> Option<(crate::boxes::BoxKey, u64, u64)> {
 fn payload_geometry(b: &BoxRef) -> Option<(u64, u64)> {
     match &b.kind {
         NodeKind::FullBox {
+            data_offset,
+            data_len,
+            ..
+        }
+        | NodeKind::FullContainer {
             data_offset,
             data_len,
             ..
@@ -196,7 +168,10 @@ fn decode_value<R: Read + Seek>(
 
     // Extract version and flags from the box if it's a FullBox
     let (version, flags) = match &b.kind {
-        crate::boxes::NodeKind::FullBox { version, flags, .. } => (Some(*version), Some(*flags)),
+        crate::boxes::NodeKind::FullBox { version, flags, .. }
+        | crate::boxes::NodeKind::FullContainer { version, flags, .. } => {
+            (Some(*version), Some(*flags))
+        }
         _ => (None, None),
     };
 
@@ -239,6 +214,20 @@ fn build_box<R: Read + Seek>(r: &mut R, b: &BoxRef, decode: bool, reg: &Registry
         NodeKind::Container(kids) => {
             let child_nodes = kids.iter().map(|c| build_box(r, c, decode, reg)).collect();
             (None, None, "container".to_string(), Some(child_nodes))
+        }
+        NodeKind::FullContainer {
+            version,
+            flags,
+            children: kids,
+            ..
+        } => {
+            let child_nodes = kids.iter().map(|c| build_box(r, c, decode, reg)).collect();
+            (
+                Some(*version),
+                Some(*flags),
+                "container".to_string(),
+                Some(child_nodes),
+            )
         }
     };
 
@@ -467,22 +456,72 @@ fn extract_ilst_data_value<R: Read + Seek>(
 
             let data_start = r.stream_position()?;
             let data_len = box_end.saturating_sub(data_start) as usize;
-
-            // type_code 1 = UTF-8
-            if type_code == 1 && data_len > 0 {
-                let mut buf = vec![0u8; data_len];
-                r.read_exact(&mut buf)?;
-                let s = String::from_utf8_lossy(&buf).trim().to_string();
-                if !s.is_empty() {
-                    return Ok(Some(s));
-                }
+            if data_len == 0 {
+                return Ok(None);
             }
-            return Ok(None);
+            let mut buf = vec![0u8; data_len];
+            r.read_exact(&mut buf)?;
+
+            return Ok(match type_code {
+                // 1 = UTF-8 text
+                1 => {
+                    let s = String::from_utf8_lossy(&buf).trim().to_string();
+                    (!s.is_empty()).then_some(s)
+                }
+                // 21/22 = signed/unsigned big-endian integer
+                21 | 22 => decode_be_int(&buf, type_code == 21),
+                // 0 = implicit; trkn/disk use [2 zero bytes][u16 index][u16 total]
+                0 if buf.len() >= 6 => {
+                    let index = u16::from_be_bytes([buf[2], buf[3]]);
+                    let total = u16::from_be_bytes([buf[4], buf[5]]);
+                    if index == 0 {
+                        None
+                    } else if total > 0 {
+                        Some(format!("{}/{}", index, total))
+                    } else {
+                        Some(index.to_string())
+                    }
+                }
+                _ => None,
+            });
         }
 
         r.seek(SeekFrom::Start(box_end))?;
     }
     Ok(None)
+}
+
+/// Decode a big-endian integer of 1/2/4/8 bytes as written by iTunes
+/// `data` atoms (type 21 signed, 22 unsigned).
+fn decode_be_int(buf: &[u8], signed: bool) -> Option<String> {
+    let v: i64 = match buf.len() {
+        1 => {
+            if signed {
+                buf[0] as i8 as i64
+            } else {
+                buf[0] as i64
+            }
+        }
+        2 => {
+            let raw = u16::from_be_bytes([buf[0], buf[1]]);
+            if signed {
+                raw as i16 as i64
+            } else {
+                raw as i64
+            }
+        }
+        4 => {
+            let raw = u32::from_be_bytes(buf[..4].try_into().ok()?);
+            if signed {
+                raw as i32 as i64
+            } else {
+                raw as i64
+            }
+        }
+        8 => i64::from_be_bytes(buf[..8].try_into().ok()?),
+        _ => return None,
+    };
+    Some(v.to_string())
 }
 
 /// Map iTunes atom fourccs to ffmpeg-compatible metadata key names.
@@ -493,11 +532,19 @@ fn fourcc_to_tag_key(fourcc: &[u8; 4]) -> Option<&'static str> {
         b"\xa9alb" => Some("album"),
         b"\xa9day" => Some("year"),
         b"\xa9gen" => Some("genre"),
+        b"gnre" => Some("genre"),
         b"\xa9cmt" => Some("comment"),
         b"\xa9des" => Some("description"),
         b"desc" => Some("description"),
         b"cprt" => Some("copyright"),
         b"aART" => Some("album_artist"),
+        b"\xa9too" => Some("encoder"),
+        b"\xa9wrt" => Some("composer"),
+        b"\xa9lyr" => Some("lyrics"),
+        b"\xa9grp" => Some("grouping"),
+        b"tmpo" => Some("tempo"),
+        b"trkn" => Some("track"),
+        b"disk" => Some("disc"),
         _ => None,
     }
 }
