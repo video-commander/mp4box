@@ -576,3 +576,105 @@ fn emsg_v0_and_v1_decode() {
     assert_eq!(d.presentation_time_delta, None);
     assert_eq!(d.message_size, 0);
 }
+
+// ---------- esds AudioSpecificConfig ----------
+
+/// Build an esds payload with the given DecoderSpecificInfo bytes.
+fn esds_payload(object_type: u8, dsi: &[u8]) -> Vec<u8> {
+    let mut p = Vec::new();
+    // ES_Descriptor (tag 3): ES_ID(2) + flags(1) + DecoderConfigDescriptor
+    let dcd_len = 13 + 2 + dsi.len();
+    p.push(0x03);
+    p.push((3 + 2 + dcd_len) as u8);
+    p.extend_from_slice(&[0, 1, 0]); // ES_ID=1, no flags
+    // DecoderConfigDescriptor (tag 4)
+    p.push(0x04);
+    p.push((13 + 2 + dsi.len()) as u8);
+    p.push(object_type);
+    p.extend_from_slice(&[0x15, 0, 0, 0]); // streamType + bufferSizeDB
+    p.extend_from_slice(&128_000u32.to_be_bytes()); // maxBitrate
+    p.extend_from_slice(&96_000u32.to_be_bytes()); // avgBitrate
+    // DecoderSpecificInfo (tag 5)
+    p.push(0x05);
+    p.push(dsi.len() as u8);
+    p.extend_from_slice(dsi);
+    p
+}
+
+fn parse_esds(dsi: &[u8]) -> mp4box::registry::EsdsData {
+    let data = full_box(b"esds", 0, 0, &esds_payload(0x40, dsi));
+    let boxes = parse(&data);
+    let Some(StructuredData::ElementaryStream(d)) = &find(&boxes, "esds").structured_data else {
+        panic!("expected structured esds");
+    };
+    d.clone()
+}
+
+#[test]
+fn esds_aac_lc() {
+    // AOT=2 (00010), freq idx=4/44100 (0100), channels=2 (0010), GA=000
+    // -> 00010 0100 0010 000x = 0x12 0x10
+    let d = parse_esds(&[0x12, 0x10]);
+    let a = d.audio_config.expect("audio config");
+    assert_eq!(a.profile, "AAC-LC");
+    assert_eq!(a.audio_object_type, 2);
+    assert_eq!(a.sample_rate, 44100);
+    assert_eq!(a.channel_configuration, 2);
+    assert!(!a.sbr);
+    assert_eq!(a.extension_sample_rate, None);
+    assert_eq!(d.max_bitrate, 128_000);
+    assert_eq!(d.avg_bitrate, 96_000);
+}
+
+#[test]
+fn esds_he_aac_hierarchical() {
+    // AOT=5/SBR (00101), ext freq idx... wait: hierarchical layout is
+    // aot=5, core freq idx=7/22050 (0111), channels=2 (0010),
+    // ext freq idx=4/44100 (0100), inner aot=2 (00010)
+    // bits: 00101 0111 0010 0100 00010 -> 0x2B 0x92 0x08 (last 2 bits pad)
+    let d = parse_esds(&[0x2B, 0x92, 0x08]);
+    let a = d.audio_config.expect("audio config");
+    assert_eq!(a.profile, "HE-AAC");
+    assert!(a.sbr);
+    assert!(!a.ps);
+    assert_eq!(a.sample_rate, 22050);
+    assert_eq!(a.extension_sample_rate, Some(44100));
+    assert_eq!(a.audio_object_type, 2); // inner codec is AAC-LC
+}
+
+#[test]
+fn esds_he_aac_backward_compatible() {
+    // Real-world bytes from an AudioToolbox HE-AAC encode:
+    // AAC-LC@22050 stereo core + 0x2B7 sync extension, SBR, ext rate 44100.
+    let d = parse_esds(&[0x13, 0x90, 0x56, 0xE5, 0xA0]);
+    let a = d.audio_config.expect("audio config");
+    assert_eq!(a.profile, "HE-AAC");
+    assert!(a.sbr);
+    assert!(!a.ps);
+    assert_eq!(a.sample_rate, 22050);
+    assert_eq!(a.extension_sample_rate, Some(44100));
+    assert_eq!(a.channel_configuration, 2);
+}
+
+#[test]
+fn esds_plain_aac_without_dsi_still_decodes() {
+    // esds with no DecoderSpecificInfo at all.
+    let mut p = Vec::new();
+    p.push(0x03);
+    p.push(18);
+    p.extend_from_slice(&[0, 1, 0]);
+    p.push(0x04);
+    p.push(13);
+    p.push(0x6B); // MP3
+    p.extend_from_slice(&[0x15, 0, 0, 0]);
+    p.extend_from_slice(&320_000u32.to_be_bytes());
+    p.extend_from_slice(&320_000u32.to_be_bytes());
+    let data = full_box(b"esds", 0, 0, &p);
+    let boxes = parse(&data);
+    let Some(StructuredData::ElementaryStream(d)) = &find(&boxes, "esds").structured_data else {
+        panic!("expected structured esds");
+    };
+    assert_eq!(d.object_type, 0x6B);
+    assert_eq!(d.object_type_name, "MP3");
+    assert!(d.audio_config.is_none());
+}

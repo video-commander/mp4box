@@ -58,6 +58,49 @@ pub enum StructuredData {
     TrackEncryption(TencData),
     /// Event Message Box (emsg)
     EventMessage(EmsgData),
+    /// Elementary Stream Descriptor (esds)
+    ElementaryStream(EsdsData),
+}
+
+/// Elementary Stream Descriptor data (esds, ISO 14496-1/-3)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EsdsData {
+    pub version: u8,
+    pub flags: u32,
+    /// MPEG-4 objectTypeIndication (0x40 = MPEG-4 Audio/AAC, 0x6B = MP3, ...)
+    pub object_type: u8,
+    /// Human-readable name for `object_type`
+    pub object_type_name: String,
+    pub max_bitrate: u32,
+    pub avg_bitrate: u32,
+    /// Parsed AudioSpecificConfig from DecoderSpecificInfo, when present
+    /// and the stream is MPEG-4 audio.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub audio_config: Option<AudioSpecificConfig>,
+}
+
+/// AudioSpecificConfig (ISO 14496-3 §1.6.2.1), the authoritative source of
+/// AAC profile, sample rate, and channel layout. The sample-entry fields
+/// are unreliable for HE-AAC, where SBR doubles the output rate.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AudioSpecificConfig {
+    /// audioObjectType (2 = AAC-LC, 5 = SBR, 29 = PS, ...)
+    pub audio_object_type: u8,
+    /// Profile name derived from the object type and SBR/PS signaling
+    /// ("AAC-LC", "HE-AAC", "HE-AAC v2", ...)
+    pub profile: String,
+    /// Core sampling frequency in Hz
+    pub sample_rate: u32,
+    /// Output sampling frequency after SBR extension, when explicitly
+    /// signaled (typically double the core rate)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub extension_sample_rate: Option<u32>,
+    /// channelConfiguration (1 = mono, 2 = stereo, ..., 7 = 7.1)
+    pub channel_configuration: u8,
+    /// Explicit SBR signaling present (HE-AAC)
+    pub sbr: bool,
+    /// Explicit PS signaling present (HE-AAC v2)
+    pub ps: bool,
 }
 
 /// Protection System Specific Header Box data (ISO 23001-7)
@@ -282,6 +325,27 @@ impl StructuredData {
                         d.default_crypt_byte_block, d.default_skip_byte_block
                     ));
                 }
+                s
+            }
+            StructuredData::ElementaryStream(d) => {
+                let mut s = format!(
+                    "objectType=0x{:02X} ({})",
+                    d.object_type, d.object_type_name
+                );
+                if let Some(a) = &d.audio_config {
+                    s.push_str(&format!(
+                        " profile={} sample_rate={}",
+                        a.profile, a.sample_rate
+                    ));
+                    if let Some(ext) = a.extension_sample_rate {
+                        s.push_str(&format!(" output_rate={}", ext));
+                    }
+                    s.push_str(&format!(" channels={}", a.channel_configuration));
+                }
+                s.push_str(&format!(
+                    " max_bitrate={} avg_bitrate={}",
+                    d.max_bitrate, d.avg_bitrate
+                ));
                 s
             }
             StructuredData::EventMessage(d) => {
@@ -1562,7 +1626,7 @@ impl BoxDecoder for EsdsDecoder {
         pos += 1;
 
         // streamType(1) + bufferSizeDB(3) + maxBitrate(4) + avgBitrate(4)
-        if pos + 8 > buf.len() {
+        if pos + 12 > buf.len() {
             return Ok(BoxValue::Text(format!(
                 "esds: objectType=0x{:02X}",
                 object_type
@@ -1571,15 +1635,12 @@ impl BoxDecoder for EsdsDecoder {
         pos += 4; // skip streamType byte + bufferSizeDB
         let max_bitrate = u32::from_be_bytes(buf[pos..pos + 4].try_into().unwrap());
         pos += 4;
-        let avg_bitrate = if pos + 4 <= buf.len() {
-            u32::from_be_bytes(buf[pos..pos + 4].try_into().unwrap())
-        } else {
-            0
-        };
+        let avg_bitrate = u32::from_be_bytes(buf[pos..pos + 4].try_into().unwrap());
+        pos += 4;
 
         let type_name = match object_type {
-            0x40 => "AAC",
-            0x66..=0x68 => "MPEG-4 Audio",
+            0x40 => "MPEG-4 Audio",
+            0x66..=0x68 => "MPEG-2 AAC",
             0x69 => "MPEG-2 Audio",
             0x6B => "MP3",
             0x20 => "MPEG-4 Visual",
@@ -1588,11 +1649,166 @@ impl BoxDecoder for EsdsDecoder {
             _ => "unknown",
         };
 
-        Ok(BoxValue::Text(format!(
-            "objectType=0x{:02X} ({}) max_bitrate={} avg_bitrate={}",
-            object_type, type_name, max_bitrate, avg_bitrate
+        // DecoderSpecificInfo tag = 0x05: for MPEG-4 audio this holds the
+        // AudioSpecificConfig — the authoritative profile/rate/channels.
+        let mut audio_config = None;
+        if pos < buf.len() && buf[pos] == 0x05 {
+            pos += 1;
+            if let Some(len) = read_descriptor_length(&buf, &mut pos) {
+                let end = (pos + len as usize).min(buf.len());
+                let is_mpeg4_audio = object_type == 0x40 || (0x66..=0x68).contains(&object_type);
+                if is_mpeg4_audio {
+                    audio_config = parse_audio_specific_config(&buf[pos..end]);
+                }
+            }
+        }
+
+        Ok(BoxValue::Structured(StructuredData::ElementaryStream(
+            EsdsData {
+                version: _version.unwrap_or(0),
+                flags: _flags.unwrap_or(0),
+                object_type,
+                object_type_name: type_name.to_string(),
+                max_bitrate,
+                avg_bitrate,
+                audio_config,
+            },
         )))
     }
+}
+
+// ---------- AudioSpecificConfig (ISO 14496-3) ----------
+
+/// MSB-first bit reader over a byte slice.
+struct BitReader<'a> {
+    buf: &'a [u8],
+    bit: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        Self { buf, bit: 0 }
+    }
+
+    fn read(&mut self, n: usize) -> Option<u32> {
+        debug_assert!(n <= 32);
+        let mut v = 0u32;
+        for _ in 0..n {
+            let byte = self.buf.get(self.bit / 8)?;
+            v = (v << 1) | ((byte >> (7 - self.bit % 8)) & 1) as u32;
+            self.bit += 1;
+        }
+        Some(v)
+    }
+}
+
+fn aac_sample_rate(index: u32) -> Option<u32> {
+    [
+        96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
+    ]
+    .get(index as usize)
+    .copied()
+}
+
+fn audio_object_type_name(aot: u8) -> &'static str {
+    match aot {
+        1 => "AAC Main",
+        2 => "AAC-LC",
+        3 => "AAC SSR",
+        4 => "AAC LTP",
+        5 => "SBR",
+        6 => "AAC Scalable",
+        23 => "AAC-LD",
+        29 => "PS",
+        39 => "AAC-ELD",
+        42 => "xHE-AAC (USAC)",
+        _ => "MPEG-4 Audio",
+    }
+}
+
+/// Parse the leading fields of an AudioSpecificConfig: object type,
+/// sampling frequency, channel configuration, and explicit (hierarchical)
+/// SBR/PS signaling. Implicit HE-AAC signaling lives in the bitstream and
+/// cannot be detected here.
+fn parse_audio_specific_config(buf: &[u8]) -> Option<AudioSpecificConfig> {
+    let mut r = BitReader::new(buf);
+
+    let read_aot = |r: &mut BitReader| -> Option<u8> {
+        let aot = r.read(5)?;
+        if aot == 31 {
+            Some((32 + r.read(6)?) as u8)
+        } else {
+            Some(aot as u8)
+        }
+    };
+    let read_rate = |r: &mut BitReader| -> Option<u32> {
+        let idx = r.read(4)?;
+        if idx == 15 {
+            r.read(24)
+        } else {
+            aac_sample_rate(idx)
+        }
+    };
+
+    let mut aot = read_aot(&mut r)?;
+    let sample_rate = read_rate(&mut r)?;
+    let channel_configuration = r.read(4)? as u8;
+
+    // Explicit hierarchical signaling: AOT 5 (SBR) / 29 (PS) wrap the real
+    // codec — the extension rate and true object type follow.
+    let mut sbr = false;
+    let mut ps = false;
+    let mut extension_sample_rate = None;
+    if aot == 5 || aot == 29 {
+        sbr = true;
+        ps = aot == 29;
+        extension_sample_rate = Some(read_rate(&mut r)?);
+        aot = read_aot(&mut r)?;
+    } else if matches!(aot, 1..=4 | 6 | 7 | 17 | 19..=23) {
+        // Explicit backward-compatible signaling: a GASpecificConfig
+        // followed by a 0x2B7 sync extension carrying SBR (and possibly PS)
+        // at the end of the config. Skip the GASpecificConfig fields first.
+        let ga_ok = (|| -> Option<bool> {
+            let _frame_length_flag = r.read(1)?;
+            if r.read(1)? == 1 {
+                r.read(14)?; // coreCoderDelay
+            }
+            // extensionFlag adds AOT-specific fields we don't model; give
+            // up on sync-extension detection rather than misread bits.
+            Some(r.read(1)? == 0)
+        })();
+
+        if ga_ok == Some(true)
+            && r.read(11) == Some(0x2B7)
+            && read_aot(&mut r) == Some(5)
+            && r.read(1) == Some(1)
+        {
+            sbr = true;
+            extension_sample_rate = read_rate(&mut r);
+            // HE-AAC v2: a second sync extension signals parametric stereo.
+            if r.read(11) == Some(0x548) && r.read(1) == Some(1) {
+                ps = true;
+            }
+        }
+    }
+
+    let profile = if ps {
+        "HE-AAC v2".to_string()
+    } else if sbr {
+        "HE-AAC".to_string()
+    } else {
+        audio_object_type_name(aot).to_string()
+    };
+
+    Some(AudioSpecificConfig {
+        audio_object_type: aot,
+        profile,
+        sample_rate,
+        extension_sample_rate,
+        channel_configuration,
+        sbr,
+        ps,
+    })
 }
 
 // avcC: AVC decoder configuration record
