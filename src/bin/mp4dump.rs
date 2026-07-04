@@ -16,7 +16,8 @@ struct Args {
     /// MP4/ISOBMFF file path
     path: String,
 
-    /// Only print subtree(s) matching a dotted path (e.g. moov.trak[0].mdia.minf.stbl)
+    /// Only print subtree(s) matching a box path (e.g. moov/trak[0]/mdia/minf/stbl;
+    /// '.' is also accepted as a separator)
     #[arg(long = "filter")]
     filter: Option<String>,
 
@@ -333,12 +334,14 @@ fn select_boxes(list: &[BoxRef], sel: &str, out: &mut Vec<(u64, u64, mp4box::box
     }
 }
 
-// ---------- Filter path: moov.trak[0].mdia.minf.stbl ----------
+// ---------- Filter path: moov/trak[0]/mdia/minf/stbl (or dot-separated) ----------
 
 fn select_by_path<'a>(roots: &'a [BoxRef], path: &str) -> Vec<&'a BoxRef> {
     let mut current: Vec<&'a BoxRef> = roots.iter().collect();
 
-    for (depth, seg) in path.split('.').enumerate() {
+    // '/' is the canonical separator (matching mp4edit); '.' is kept for
+    // backward compatibility.
+    for (depth, seg) in path.split(['/', '.']).enumerate() {
         let (name, idx) = parse_segment(seg);
         let fourcc = FourCC::from_str(name).unwrap_or(FourCC(*b"????"));
         let mut next = Vec::new();

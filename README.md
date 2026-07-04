@@ -5,9 +5,8 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust Version](https://img.shields.io/badge/rust-1.70+-orange.svg)
 
-A minimal, dependency-light MP4/ISOBMFF parser for Rust.  
-Parses the MP4 box tree, supports large-size and UUID boxes, and exposes a full known-box table with human-readable names.  
-Includes an optional pluggable decoder registry for structured box interpretation.  
+A minimal, dependency-light MP4/ISOBMFF parser and editor for Rust.
+Parses the full box tree (including codec configuration inside `stsd`), decodes known boxes into typed structures, extracts per-sample tables from both progressive and fragmented (fMP4/DASH/CMAF) files, reads iTunes metadata, and performs non-destructive box editing with automatic size and chunk-offset fixup.
 Suitable for CLIs, Tauri backends, media inspectors, and developer tooling.
 
 ---
@@ -18,8 +17,15 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mp4box = "0.7.0"
+mp4box = "0.9.0"
 anyhow = "1.0"  # For error handling in examples
+```
+
+Box editing is behind the `edit` feature (enabled by default). For a
+parse-only build:
+
+```toml
+mp4box = { version = "0.9.0", default-features = false }
 ```
 
 ---
@@ -33,20 +39,20 @@ use std::fs::File;
 fn main() -> anyhow::Result<()> {
     let mut file = File::open("video.mp4")?;
     let size = file.metadata()?.len();
-    
+
     // Parse all boxes without decoding
     let boxes = get_boxes(&mut file, size, false)?;
     println!("Found {} top-level boxes", boxes.len());
-    
+
     // Parse with decoding for known box types
     let mut file = File::open("video.mp4")?;
     let decoded_boxes = get_boxes(&mut file, size, true)?;
-    
+
     // Print decoded info for ftyp box
     if let Some(ftyp) = decoded_boxes.iter().find(|b| b.typ == "ftyp") {
         println!("File type: {}", ftyp.decoded.as_ref().unwrap_or(&"unknown".to_string()));
     }
-    
+
     Ok(())
 }
 ```
@@ -55,45 +61,25 @@ fn main() -> anyhow::Result<()> {
 
 ## Features
 
-- **Zero-dependency parser** (`Read + Seek`)
+- **Zero-dependency core parser** (`Read + Seek`)
 - **Full MP4/ISOBMFF box tree**
-  - Leaf, FullBox (version/flags), Container, UUID
-- **Large-size (64-bit) support**
-- **UUID box support**
-- **Known-Box registry**
-  - `ftyp → File Type Box`
-  - `moov → Movie Box`
-  - Hundreds of ISO/HEIF/MPEG boxes with full names
-- **Custom decoders**
-  - Attach your own parser for any 4CC or UUID
-- **Frontend-friendly JSON**
-  - Works perfectly in Tauri or WebView apps
-
----
-
-## Example: Parse the box tree
-
-```rust
-use mp4box::parser::{read_box_header, parse_children};
-use mp4box::boxes::{BoxRef, NodeKind};
-use std::fs::File;
-use std::io::{Seek, SeekFrom};
-
-fn main() -> anyhow::Result<()> {
-    let mut f = File::open("input.mp4")?;
-    let file_len = f.metadata()?.len();
-
-    while f.stream_position()? < file_len {
-        let h = read_box_header(&mut f)?;
-        println!("Found box {} @ {:#x}, size={}", h.typ, h.start, h.size);
-
-        let end = if h.size == 0 { file_len } else { h.start + h.size };
-        f.seek(SeekFrom::Start(end))?;
-    }
-
-    Ok(())
-}
-```
+  - Leaf, FullBox (version/flags), Container, FullBox containers (`meta`, `stsd`), UUID
+  - Large-size (64-bit) boxes; recursion into `stsd` sample entries and their
+    codec configuration children (`avcC`, `hvcC`, `esds`, `dOps`, ...)
+- **Known-box registry** — hundreds of ISO/HEIF/MPEG boxes with full names
+- **Typed structured decoding** — `mvhd`, `tkhd`, `mdhd`, `stsd`, the whole
+  sample table family, `elst`, `sidx`, and the fragment boxes
+  (`tfhd`/`tfdt`/`trun`/`trex`) decode to serializable structs
+- **Sample tables** — per-sample DTS/PTS, duration, size, file offset, and
+  keyframe flags for progressive *and* fragmented (fMP4/DASH/CMAF) files
+- **iTunes metadata** — read tags with `get_itunes_tags`, write them with the
+  edit API
+- **Non-destructive editing** (`edit` feature) — remove/insert/replace boxes,
+  patch header fields, set tags; box sizes and `stco`/`co64` chunk offsets
+  are fixed up automatically
+- **Custom decoders** — attach your own parser for any 4CC or UUID
+- **Frontend-friendly JSON** — works perfectly in Tauri or WebView apps
+- **CLI tools** — `mp4dump`, `mp4info`, `mp4samples`, `mp4edit`
 
 ---
 
@@ -105,11 +91,11 @@ use std::fs::File;
 
 let mut file = File::open("video.mp4")?;
 let size = file.metadata()?.len();
-let boxes = get_boxes(&mut file, size, /*decode=*/ false)?;
+let boxes = get_boxes(&mut file, size, /*decode=*/ true)?;
 println!("{} top-level boxes", boxes.len());
 ```
 
-This returns:
+This returns a serializable tree:
 
 ```json
 [
@@ -125,79 +111,216 @@ This returns:
 ]
 ```
 
+Known boxes also carry `structured_data` — typed values instead of strings:
+
+```rust
+use mp4box::registry::StructuredData;
+
+if let Some(StructuredData::MovieHeader(mvhd)) = &boxes[1].children.as_ref().unwrap()[0].structured_data {
+    println!("duration: {:.2}s", mvhd.duration as f64 / mvhd.timescale as f64);
+}
+```
+
 ---
 
-## Example: Command-line tool (`mp4dump`)
+## Example: Per-sample tables (progressive and fragmented)
 
-`mp4dump` is included as an optional binary that uses this crate to inspect MP4 files.
+```rust
+use mp4box::track_samples_from_path;
 
-### Show structure
+for track in track_samples_from_path("video.mp4")? {
+    let keyframes = track.samples.iter().filter(|s| s.is_sync).count();
+    println!(
+        "track {} ({}): {} samples, {} keyframes, {:.2}s",
+        track.track_id,
+        track.handler_type,
+        track.sample_count,
+        keyframes,
+        track.duration as f64 / track.timescale as f64,
+    );
+    // each sample: dts, pts, duration, size, file_offset, is_sync
+}
+```
+
+Fragmented files (`moof`/`traf`/`trun`) are handled transparently: samples are
+assembled across all fragments using the tfhd/trex defaulting rules, with
+byte offsets and keyframe flags matching what ffprobe reports.
+
+---
+
+## Example: iTunes metadata
+
+```rust
+use mp4box::get_itunes_tags;
+use std::fs::File;
+
+let mut file = File::open("video.mp4")?;
+let size = file.metadata()?.len();
+let tags = get_itunes_tags(&mut file, size)?;
+// {"title": "...", "artist": "...", "encoder": "...", "track": "3/12", ...}
+```
+
+---
+
+## Example: Editing (requires the `edit` feature)
+
+Editing is non-destructive: the source file is never modified, untouched
+bytes are streamed through verbatim (an `mdat` is never loaded into memory),
+and ancestor box sizes plus `stco`/`co64` chunk offsets are recomputed
+automatically. Re-serializing with no edits reproduces the input byte for
+byte.
+
+```rust
+use mp4box::edit::Editor;
+
+let mut editor = Editor::new();
+editor.set_tag("title", "My Movie")?;
+editor.set_field("moov/mvhd", "creation_time", "0");
+editor.remove("moov/udta/meta");           // paths support indices: moov/trak[1]/...
+editor.remove_all("free");                 // strip every `free` box
+
+let stats = editor.process_file("in.mp4", "out.mp4")?;
+println!("{} chunk offsets adjusted", stats.chunk_offsets_adjusted);
+```
+
+Fragmented (`moof`/`sidx`) and HEIF (`iloc`) files are refused with a clear
+error rather than corrupted — their internal offsets are not covered by the
+fixup pass yet.
+
+---
+
+## Command-line tools
+
+### `mp4dump` — box tree explorer
 
 ```bash
 $ mp4dump input.mp4
-   0x0         32 ftyp
-  0x20          8 free
-  0x28    3374542 mdat
-0x337df6     170458 moov (container)
-  0x337dfe        108 mvhd (ver=0)
+   0x0         32 ftyp (File Type Box)
+  0x20          8 free (Free Space Box)
+  0x28    3374542 mdat (Media Data Box)
+0x337df6     170458 moov (Movie Box) (container)
+  0x337dfe        108 mvhd (Movie Header Box) (ver=0, flags=0x000000)
   ...
 ```
-
-### Decode known boxes
 
 ```bash
 $ mp4dump input.mp4 --decode
-   0x0         32 ftyp
-        -> major=isom minor=512 compatible=["isom","iso2","avc1","mp41"]
+   0x0         32 ftyp (File Type Box)
+        -> major=isom minor=512 compatible=["isom", "iso2", "avc1", "mp41"]
+...
+           0x191        174 stsd (Sample Description Box) (container, ver=0, flags=0x000000)
+        -> codec=avc1 1920x1080 entries=1
+             0x1a1        158 avc1 (AVC Video Sample Entry) (container)
+               0x1f7         56 avcC (AVC Decoder Configuration Box)
+        -> configurationVersion=1 profile=100 compat=0x00 level=4.0 nal_length_size=4
 ```
 
+Filter a subtree, emit JSON, or dump raw payload bytes:
+
 ```bash
+$ mp4dump input.mp4 --filter 'moov/trak[0]/mdia/minf/stbl'
 $ mp4dump input.mp4 --decode --json
-[
-  {
-    "offset": 0,
-    "size": 32,
-    "typ": "ftyp",
-    "uuid": null,
-    "version": null,
-    "flags": null,
-    "kind": "leaf",
-    "full_name": "File Type Box",
-    "decoded": "major=isom minor=512 compatible=[\"isom\", \"iso2\", \"avc1\", \"mp41\"]",
-    "children": null
-  },
-  ...
+$ mp4dump input.mp4 --raw stsd --bytes 256
 ```
 
-### Dump raw bytes (like `xxd`)
+### `mp4info` — media summary
 
 ```bash
-$ mp4dump input.mp4 --raw stsd --bytes 256
-== Dump stsd payload: offset=0x337fe6, len=156 ==
-00000000: 00 00 00 00 00 00 00 01 61 76 63 31 ...
-`````
+$ mp4info input.mp4
+File: input.mp4
+Major brand: isom
+Minor version: 512
+Compatible brands: isom, iso2, avc1, mp41
+Movie duration: 600000 ticks @ 1000 -> 600.000 s
+Tracks:
+  Track 1:
+    type: video
+    codec: avc1
+    size: 320x180
+    timescale: 12800
+    duration: 7680000 ticks -> 600.000 s
+    language: und
+```
+
+### `mp4samples` — per-sample tables
+
+```bash
+$ mp4samples input.mp4 --limit 3
+Track 1 (vide) timescale=12800 duration=7680000 sample_count=15000
+idx    start(s)   dur(ts)  size   offset      sync
+----------------------------------------------------
+    0     0.0800      512   3417         48 *
+    1     0.1600      512    264       3465
+    2     0.1200      512    159       3729
+```
+
+### `mp4edit` — non-destructive editor
+
+```bash
+$ mp4edit --tag title="My Movie" --tag artist="Me" \
+          --set moov/mvhd.creation_time=0 \
+          --remove-all free \
+          input.mp4 output.mp4
+wrote output.mp4 (158008454 bytes, 2336 chunk offsets adjusted)
+```
 
 ---
 
 ## Adding Custom Box Decoders
 
+Extend the default registry with a decoder for any 4CC or UUID; the decoded
+value shows up in the same tree as the built-ins.
+
 ```rust
-use mp4box::registry::{Registry, BoxDecoder, BoxValue};
-use mp4box::boxes::{BoxHeader, BoxKey};
+use mp4box::{BoxHeader, BoxKey, FourCC, get_boxes_with_registry};
+use mp4box::registry::{BoxDecoder, BoxValue, default_registry};
+use std::fs::File;
 use std::io::Read;
 
 struct MyDecoder;
 
 impl BoxDecoder for MyDecoder {
-    fn decode(&self, r: &mut dyn Read, _hdr: &BoxHeader) -> anyhow::Result<BoxValue> {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
         let mut buf = Vec::new();
         r.read_to_end(&mut buf)?;
-        Ok(BoxValue::Bytes(buf))
+        Ok(BoxValue::Text(format!("{} bytes", buf.len())))
     }
 }
 
-let reg = Registry::new()
-    .with_decoder(BoxKey::FourCC(*b"ftyp"), "ftyp", Box::new(MyDecoder));
+let reg = default_registry().with_decoder(
+    BoxKey::FourCC(FourCC(*b"xyz ")),
+    "xyz ",
+    Box::new(MyDecoder),
+);
+
+let mut file = File::open("video.mp4")?;
+let size = file.metadata()?.len();
+let boxes = get_boxes_with_registry(&mut file, size, true, &reg)?;
+```
+
+---
+
+## Examples
+
+Runnable examples live in [`examples/`](examples/):
+
+| Example | Shows |
+|---|---|
+| `boxes` | Walking the box tree with names and version/flags |
+| `media_info` | Typed structured data: movie/track headers, codec details, edit lists, tags |
+| `samples` | Sample table analysis |
+| `fragments` | Fragmented MP4 inspection and assembled per-track samples |
+| `edit` | Setting tags and zeroing timestamps with the edit API |
+| `simple` | Hex-dumping a byte range |
+
+```bash
+cargo run --example media_info -- video.mp4
 ```
 
 ---
