@@ -1,20 +1,31 @@
 //! # mp4box
 //!
-//! A minimal, dependency-light MP4/ISOBMFF parser for Rust.
+//! A minimal, dependency-light MP4/ISOBMFF parser and editor for Rust.
 //!
-//! This crate parses the MP4 box tree (including 64-bit "large" boxes and
-//! UUID boxes), classifies known box types, and provides optional decoding
-//! of common box types through a pluggable registry system.
+//! This crate parses the MP4 box tree (including 64-bit "large" boxes, UUID
+//! boxes, and the codec configuration inside `stsd` sample entries), decodes
+//! known box types into typed structures, extracts per-sample tables from
+//! progressive and fragmented (fMP4/DASH/CMAF) files, and performs
+//! non-destructive box editing with automatic size and chunk-offset fixup.
 //!
 //! ## Features
-//! - Zero-dependency core parser that works with any `Read + Seek` source
-//! - Support for large (64-bit) boxes and UUID boxes  
-//! - Comprehensive known-box registry with human-readable names
+//! - Core parser with only `anyhow` + `serde` as dependencies, working with
+//!   any `Read + Seek` source
+//! - Typed structured decoding ([`registry::StructuredData`]) for headers,
+//!   sample tables, fragments, DRM boxes (`pssh`/`tenc`), and codec
+//!   configuration (`esds` AudioSpecificConfig, `avcC`, `hvcC`, ...)
+//! - Per-sample tables ([`track_samples_from_path`]) for progressive and
+//!   fragmented files: DTS/PTS, sizes, offsets, keyframes
+//! - Tolerant parsing ([`get_boxes_tolerant`]): partial tree plus located
+//!   issues instead of an error on damaged files
+//! - Non-destructive editing (`edit` feature, [`edit::Editor`]): remove /
+//!   insert / replace boxes, patch fields, set tags, faststart
+//! - iTunes metadata reading ([`get_itunes_tags`]) and writing
 //! - JSON-serializable output perfect for web UIs and APIs
-//! - Optional structured decoding with pluggable decoders
-//! - Command-line tools for MP4 inspection and debugging
+//! - Command-line tools (`cli` feature): `mp4dump`, `mp4info`,
+//!   `mp4samples`, `mp4edit`
 //!
-//! ## Use Cases  
+//! ## Use Cases
 //! - CLIs for inspecting MP4 structure (e.g. `mp4dump`)
 //! - Tauri/Electron desktop apps that need JSON output for UI
 //! - Backend services that need to inspect or validate MP4 files

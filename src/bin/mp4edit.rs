@@ -19,7 +19,7 @@ struct Args {
     remove_all: Vec<String>,
 
     /// Insert a raw box file (header + payload) as a child.
-    /// Format: PARENT_PATH:FILE[:POSITION]
+    /// Format: `PARENT_PATH:FILE[:POSITION]`
     #[arg(long = "insert", value_name = "PATH:FILE[:POS]")]
     insert: Vec<String>,
 

@@ -73,7 +73,8 @@ pub fn get_boxes<R: Read + Seek>(r: &mut R, size: u64, decode: bool) -> anyhow::
 
 /// Like [`get_boxes`], but recovers from malformed boxes instead of failing:
 /// returns the tree that could be parsed together with a list of
-/// [`ParseIssue`]s (offset + description) for everything that couldn't.
+/// [`ParseIssue`](crate::parser::ParseIssue)s (offset + description) for
+/// everything that couldn't.
 ///
 /// A clean file returns an empty issue list and the same tree as
 /// [`get_boxes`]. Damage is contained to the enclosing container: a corrupt

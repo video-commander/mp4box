@@ -16,7 +16,7 @@ struct Args {
     /// MP4/ISOBMFF file path
     path: String,
 
-    /// Only print subtree(s) matching a box path (e.g. moov/trak[0]/mdia/minf/stbl;
+    /// Only print subtree(s) matching a box path (e.g. `moov/trak[0]/mdia/minf/stbl`;
     /// '.' is also accepted as a separator)
     #[arg(long = "filter")]
     filter: Option<String>,

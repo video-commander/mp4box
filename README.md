@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/mp4box.svg)](https://crates.io/crates/mp4box)
 [![Docs.rs](https://docs.rs/mp4box/badge.svg)](https://docs.rs/mp4box)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Rust Version](https://img.shields.io/badge/rust-1.70+-orange.svg)
+![Rust Version](https://img.shields.io/badge/rust-1.88+-orange.svg)
 
 A minimal, dependency-light MP4/ISOBMFF parser and editor for Rust.
 Parses the full box tree (including codec configuration inside `stsd`), decodes known boxes into typed structures, extracts per-sample tables from both progressive and fragmented (fMP4/DASH/CMAF) files, reads iTunes metadata, and performs non-destructive box editing with automatic size and chunk-offset fixup.
