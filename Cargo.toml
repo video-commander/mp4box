@@ -1,6 +1,6 @@
 [package]
 name = "mp4box"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.88"
 description = "MP4/ISOBMFF parser and editor: box trees, typed decoding, sample tables, fragmented MP4, and non-destructive editing"
