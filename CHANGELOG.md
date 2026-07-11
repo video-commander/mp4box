@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0]
+
+### Added
+
+- **System-specific `pssh` payload decoding** (new `drm` module). The 0.9.0
+  decoders identified the DRM system; the data blob now decodes too:
+  - **Widevine**: dependency-free protobuf decoder for the `WidevinePsshData`
+    schema — algorithm, key IDs, provider, content ID (hex + printable-text
+    form), policy, crypto period index, protection scheme (cenc/cbcs/cens/cbc1).
+    Unknown fields are skipped; garbage input is rejected rather than
+    misdecoded.
+  - **PlayReady**: PlayReady Object parser — length-prefixed records, UTF-16LE
+    `WRMHEADER` XML (versions 4.0–4.3), key IDs converted from the
+    little-endian GUID layout to CENC byte order, `LA_URL`, and the full
+    header XML.
+- `drm::parse_pssh_boxes`: parse one or more concatenated raw `pssh` boxes
+  outside a file context (the form carried by DASH `cenc:pssh` elements);
+  `drm::pssh_from_raw_widevine` wraps bare Widevine payloads from packager
+  logs; `WIDEVINE_SYSTEM_ID` / `PLAYREADY_SYSTEM_ID` constants.
+- `util::base64_decode`: dependency-free standard/URL-safe base64 decoding
+  (padding optional).
+
+### Changed
+
+- **Breaking**: `PsshData` gained `widevine` and `playready` fields (boxed,
+  `Option`, omitted from JSON when absent). Code constructing `PsshData` with
+  a struct literal or destructuring it exhaustively must be updated; JSON
+  consumers are unaffected.
+- The `pssh` one-line summary now surfaces decoded payload highlights
+  (provider, protection scheme, WRMHEADER version, license URL).
+
 ## [0.9.0]
 
 A correctness-focused overhaul that also adds non-destructive editing,
@@ -157,6 +188,7 @@ depends only on `anyhow` + `serde` for parse-only builds.
 - Initial release: basic MP4/ISOBMFF box-tree parser with an example and the
   `mp4dump` tool.
 
+[0.10.0]: https://github.com/alfg/mp4box/releases/tag/v0.10.0
 [0.9.0]: https://github.com/alfg/mp4box/releases/tag/v0.9.0
 [0.8.0]: https://github.com/alfg/mp4box/releases/tag/v0.8.0
 [0.7.0]: https://github.com/alfg/mp4box/releases/tag/v0.7.0

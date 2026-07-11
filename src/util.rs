@@ -56,6 +56,45 @@ pub fn read_slice<R: Read + Seek>(r: &mut R, offset: u64, len: u64) -> std::io::
     Ok(v)
 }
 
+/// Decodes standard or URL-safe base64, with or without `=` padding.
+/// Returns `None` on any character outside the alphabet or an impossible
+/// length. Kept dependency-free for the same reason as [`ReadExt`].
+pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut bits: u32 = 0;
+    let mut bit_count: u8 = 0;
+    let mut out = Vec::with_capacity(s.len() / 4 * 3 + 3);
+    let mut padded = false;
+    for c in s.bytes() {
+        let value = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' => {
+                padded = true;
+                continue;
+            }
+            _ => return None,
+        };
+        // Data after padding is malformed.
+        if padded {
+            return None;
+        }
+        bits = (bits << 6) | u32::from(value);
+        bit_count += 6;
+        if bit_count >= 8 {
+            bit_count -= 8;
+            out.push((bits >> bit_count) as u8);
+        }
+    }
+    // A trailing group of 6 bits (1 leftover char) can't encode a byte.
+    if bit_count == 6 {
+        return None;
+    }
+    Some(out)
+}
+
 pub fn hex_dump(bytes: &[u8], start_offset: u64) -> String {
     // Simple hexdump
     let mut out = String::new();

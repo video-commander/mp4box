@@ -116,6 +116,15 @@ pub struct PsshData {
     pub key_ids: Vec<String>,
     /// Size of the system-specific data blob
     pub data_size: u32,
+    /// Decoded Widevine payload, when the system is Widevine and the data
+    /// blob parses as its protobuf. Boxed to keep the enum variants close
+    /// in size.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub widevine: Option<Box<crate::drm::WidevinePsshData>>,
+    /// Decoded PlayReady payload, when the system is PlayReady and the data
+    /// blob parses as a PlayReady Object.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub playready: Option<Box<crate::drm::PlayReadyPsshData>>,
 }
 
 /// Track Encryption Box data (ISO 23001-7)
@@ -309,6 +318,25 @@ impl StructuredData {
                     }
                 }
                 s.push_str(&format!(" data_size={}", d.data_size));
+                if let Some(wv) = &d.widevine {
+                    if let Some(provider) = &wv.provider {
+                        s.push_str(&format!(" provider={provider}"));
+                    }
+                    if let Some(scheme) = &wv.protection_scheme {
+                        s.push_str(&format!(" scheme={scheme}"));
+                    }
+                    if !wv.key_ids.is_empty() && d.key_ids.is_empty() {
+                        s.push_str(&format!(" wv_kids={}", wv.key_ids.len()));
+                    }
+                }
+                if let Some(pr) = &d.playready {
+                    if let Some(version) = &pr.wrm_header_version {
+                        s.push_str(&format!(" wrm_version={version}"));
+                    }
+                    if let Some(la_url) = &pr.la_url {
+                        s.push_str(&format!(" la_url=\"{la_url}\""));
+                    }
+                }
                 s
             }
             StructuredData::TrackEncryption(d) => {
@@ -2519,11 +2547,11 @@ impl BoxDecoder for TrexDecoder {
 
 // ---------- DRM / DASH decoders ----------
 
-fn hex_string(bytes: &[u8]) -> String {
+pub(crate) fn hex_string(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-fn uuid_string(bytes: &[u8; 16]) -> String {
+pub(crate) fn uuid_string(bytes: &[u8; 16]) -> String {
     format!(
         "{}-{}-{}-{}-{}",
         hex_string(&bytes[0..4]),
@@ -2535,44 +2563,10 @@ fn uuid_string(bytes: &[u8; 16]) -> String {
 }
 
 /// Well-known DRM system IDs (ISO 23001-7 pssh SystemID registry).
-fn drm_system_name(system_id: &[u8; 16]) -> Option<&'static str> {
-    match system_id {
-        [
-            0xED,
-            0xEF,
-            0x8B,
-            0xA9,
-            0x79,
-            0xD6,
-            0x4A,
-            0xCE,
-            0xA3,
-            0xC8,
-            0x27,
-            0xDC,
-            0xD5,
-            0x1D,
-            0x21,
-            0xED,
-        ] => Some("Widevine"),
-        [
-            0x9A,
-            0x04,
-            0xF0,
-            0x79,
-            0x98,
-            0x40,
-            0x42,
-            0x86,
-            0xAB,
-            0x92,
-            0xE6,
-            0x5B,
-            0xE0,
-            0x88,
-            0x5F,
-            0x95,
-        ] => Some("PlayReady"),
+pub(crate) fn drm_system_name(system_id: &[u8; 16]) -> Option<&'static str> {
+    match *system_id {
+        crate::drm::WIDEVINE_SYSTEM_ID => Some("Widevine"),
+        crate::drm::PLAYREADY_SYSTEM_ID => Some("PlayReady"),
         [
             0x94,
             0xCE,
@@ -2642,30 +2636,15 @@ impl BoxDecoder for PsshDecoder {
         version: Option<u8>,
         flags: Option<u32>,
     ) -> anyhow::Result<BoxValue> {
-        let version = version.unwrap_or(0);
-        let mut system_id = [0u8; 16];
-        r.read_exact(&mut system_id)?;
-
-        let mut key_ids = Vec::new();
-        if version >= 1 {
-            let kid_count = r.read_u32_be()?;
-            for _ in 0..kid_count {
-                let mut kid = [0u8; 16];
-                r.read_exact(&mut kid)?;
-                key_ids.push(hex_string(&kid));
-            }
-        }
-        let data_size = r.read_u32_be()?;
-
+        // The reader is bounded to the box payload, so this also picks up the
+        // system-specific data blob for crate::drm to decode.
+        let body = read_all(r)?;
         Ok(BoxValue::Structured(
-            StructuredData::ProtectionSystemHeader(PsshData {
-                version,
-                flags: flags.unwrap_or(0),
-                system_id: uuid_string(&system_id),
-                system_name: drm_system_name(&system_id).map(str::to_string),
-                key_ids,
-                data_size,
-            }),
+            StructuredData::ProtectionSystemHeader(crate::drm::parse_pssh_body(
+                version.unwrap_or(0),
+                flags.unwrap_or(0),
+                &body,
+            )?),
         ))
     }
 }

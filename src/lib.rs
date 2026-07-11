@@ -90,6 +90,7 @@
 
 pub mod api;
 pub mod boxes;
+pub mod drm;
 #[cfg(feature = "edit")]
 pub mod edit;
 pub mod known_boxes;
