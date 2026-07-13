@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0]
+
+### Added
+
+- **`iods` (Object Descriptor Box) recognition and decoding.** The box is now
+  identified (ISO/IEC 14496-14 §5.1) and its wrapped MPEG-4
+  `InitialObjectDescriptor` decoded (ISO/IEC 14496-1 §7.2.6.4): object
+  descriptor ID, inline URL (when the URL flag is set), and the five
+  profile-level indications (OD, scene, audio, visual, graphics). Accepts both
+  the `InitialObjectDescrTag` (0x02) and MP4 IOD tag (0x10); malformed
+  descriptors fall back to raw bytes. Exposed as
+  `StructuredData::ObjectDescriptor(IodsData)`.
+- **Recognition of the Google/YouTube proprietary boxes** `gsst`, `gstd`,
+  `gssd`, `gspu`, `gspm`, `gshh` (found under `moov/udta`). These are now
+  labeled with human-readable names instead of showing as unknown; their
+  payload layouts are undocumented, so contents are left as raw leaves.
+
+### Changed
+
+- The `registry` module was split from a single ~3.2k-line file into a
+  directory module (`mod`, `data`, `decoders`, `codec_config`). This is an
+  internal reorganization with no public API change: all `registry::*` paths
+  are preserved via re-exports.
+
 ## [0.10.0]
 
 ### Added
