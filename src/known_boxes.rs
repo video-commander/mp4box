@@ -223,6 +223,17 @@ pub enum KnownBox {
     Fiel,
     Tapt,
 
+    // Legacy MPEG-4 systems
+    Iods,
+
+    // Google / YouTube proprietary (moov/udta)
+    Gsst,
+    Gstd,
+    Gssd,
+    Gspu,
+    Gspm,
+    Gshh,
+
     // Raw UUID/vendor
     Uuid,
 
@@ -428,6 +439,15 @@ impl From<FourCC> for KnownBox {
             b"fiel" => KnownBox::Fiel,
             b"tapt" => KnownBox::Tapt,
 
+            b"iods" => KnownBox::Iods,
+
+            b"gsst" => KnownBox::Gsst,
+            b"gstd" => KnownBox::Gstd,
+            b"gssd" => KnownBox::Gssd,
+            b"gspu" => KnownBox::Gspu,
+            b"gspm" => KnownBox::Gspm,
+            b"gshh" => KnownBox::Gshh,
+
             b"uuid" => KnownBox::Uuid,
 
             _ => KnownBox::Unknown(cc),
@@ -560,6 +580,7 @@ impl KnownBox {
                 | KnownBox::Mean
                 | KnownBox::IlstName
                 | KnownBox::IlstData
+                | KnownBox::Iods
         )
     }
 }
@@ -738,6 +759,13 @@ impl KnownBox {
             KnownBox::Gama => "Gamma Box",
             KnownBox::Fiel => "Field Handling Box",
             KnownBox::Tapt => "Track Aperture Mode Dimensions Box",
+            KnownBox::Iods => "Object Descriptor Box",
+            KnownBox::Gsst => "Google Start Time Box",
+            KnownBox::Gstd => "Google Track Duration Box",
+            KnownBox::Gssd => "Google Source Data Box",
+            KnownBox::Gspu => "Google Ping URL Box",
+            KnownBox::Gspm => "Google Ping Message Box",
+            KnownBox::Gshh => "Google Host Header Box",
             KnownBox::Uuid => "UUID Box",
             KnownBox::Unknown(_) => "Unknown Box",
         }
