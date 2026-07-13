@@ -31,7 +31,7 @@ features add the rest:
 For the lightest library-only build:
 
 ```toml
-mp4box = { version = "0.9.0", default-features = false, features = ["edit"] }
+mp4box = { version = "0.11.0", default-features = false, features = ["edit"] }
 ```
 
 ---
@@ -74,7 +74,7 @@ fn main() -> anyhow::Result<()> {
     codec configuration children (`avcC`, `hvcC`, `esds`, `dOps`, ...)
 - **Known-box registry** — hundreds of ISO/HEIF/MPEG boxes with full names
 - **Typed structured decoding** — `mvhd`, `tkhd`, `mdhd`, `stsd`, the whole
-  sample table family, `elst`, `sidx`, and the fragment boxes
+  sample table family, `elst`, `sidx`, `iods`, and the fragment boxes
   (`tfhd`/`tfdt`/`trun`/`trex`) decode to serializable structs
 - **Sample tables** — per-sample DTS/PTS, duration, size, file offset, and
   keyframe flags for progressive *and* fragmented (fMP4/DASH/CMAF) files
