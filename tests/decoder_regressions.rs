@@ -153,7 +153,12 @@ fn decoder_without_span_map_reports_none() {
 #[test]
 fn tkhd_field_spans_track_version_widths() {
     // v0: 4-byte times/duration; width/height after the 52-byte reserved gap.
-    let v0 = parse(&full_box(b"tkhd", 0, 0, &tkhd_v0_payload(7, 48000, 1280, 720)));
+    let v0 = parse(&full_box(
+        b"tkhd",
+        0,
+        0,
+        &tkhd_v0_payload(7, 48000, 1280, 720),
+    ));
     let spans = find(&v0, "tkhd").field_spans.as_ref().unwrap();
     for (name, start, len) in [
         ("creation_time", 0, 4),
@@ -179,8 +184,17 @@ fn tkhd_field_spans_track_version_widths() {
     p.extend_from_slice(&(1080u32 << 16).to_be_bytes());
     let v1 = parse(&full_box(b"tkhd", 1, 0, &p));
     let spans = find(&v1, "tkhd").field_spans.as_ref().unwrap();
-    assert_eq!((span(spans, "track_id").start, span(spans, "track_id").length), (16, 4));
-    assert_eq!((span(spans, "width").start, span(spans, "width").length), (84, 4));
+    assert_eq!(
+        (
+            span(spans, "track_id").start,
+            span(spans, "track_id").length
+        ),
+        (16, 4)
+    );
+    assert_eq!(
+        (span(spans, "width").start, span(spans, "width").length),
+        (84, 4)
+    );
     assert_eq!(span(spans, "height").start, 88);
 }
 
@@ -214,8 +228,20 @@ fn tfhd_field_spans_follow_flag_bits() {
     let spans = find(&boxes, "tfhd").field_spans.as_ref().unwrap();
 
     assert_eq!(spans.len(), 3);
-    assert_eq!((span(spans, "track_id").start, span(spans, "track_id").length), (0, 4));
-    assert_eq!((span(spans, "base_data_offset").start, span(spans, "base_data_offset").length), (4, 8));
+    assert_eq!(
+        (
+            span(spans, "track_id").start,
+            span(spans, "track_id").length
+        ),
+        (0, 4)
+    );
+    assert_eq!(
+        (
+            span(spans, "base_data_offset").start,
+            span(spans, "base_data_offset").length
+        ),
+        (4, 8)
+    );
     assert_eq!(span(spans, "default_sample_duration").start, 12);
     // Fields whose flag bit is clear are absent.
     assert!(!spans.iter().any(|s| s.name == "default_sample_size"));
@@ -246,7 +272,13 @@ fn mdhd_trex_tfdt_field_spans() {
     let mdhd = parse(&full_box(b"mdhd", 0, 0, &m));
     let spans = find(&mdhd, "mdhd").field_spans.as_ref().unwrap();
     assert_eq!(span(spans, "timescale").start, 8);
-    assert_eq!((span(spans, "language").start, span(spans, "language").length), (16, 2));
+    assert_eq!(
+        (
+            span(spans, "language").start,
+            span(spans, "language").length
+        ),
+        (16, 2)
+    );
 
     // trex: five packed u32s.
     let trex = parse(&full_box(b"trex", 0, 0, &[0u8; 20]));
@@ -266,7 +298,13 @@ fn sample_table_header_field_spans() {
     // Sample tables span only their fixed header, not the repeating body.
     let stco = parse(&full_box(b"stco", 0, 0, &0u32.to_be_bytes()));
     let spans = find(&stco, "stco").field_spans.as_ref().unwrap();
-    assert_eq!((span(spans, "entry_count").start, span(spans, "entry_count").length), (0, 4));
+    assert_eq!(
+        (
+            span(spans, "entry_count").start,
+            span(spans, "entry_count").length
+        ),
+        (0, 4)
+    );
     assert_eq!(spans.len(), 1); // the offset array is not enumerated
 
     // stsz leads with sample_size then sample_count.
@@ -276,7 +314,13 @@ fn sample_table_header_field_spans() {
     let stsz = parse(&full_box(b"stsz", 0, 0, &sz));
     let spans = find(&stsz, "stsz").field_spans.as_ref().unwrap();
     assert_eq!(span(spans, "sample_size").start, 0);
-    assert_eq!((span(spans, "sample_count").start, span(spans, "sample_count").length), (4, 4));
+    assert_eq!(
+        (
+            span(spans, "sample_count").start,
+            span(spans, "sample_count").length
+        ),
+        (4, 4)
+    );
 }
 
 #[test]
@@ -320,7 +364,13 @@ fn emsg_field_spans_v1_only() {
     let boxes = parse(&full_box(b"emsg", 1, 0, &v1));
     let spans = find(&boxes, "emsg").field_spans.as_ref().unwrap();
     assert_eq!(span(spans, "timescale").start, 0);
-    assert_eq!((span(spans, "presentation_time").start, span(spans, "presentation_time").length), (4, 8));
+    assert_eq!(
+        (
+            span(spans, "presentation_time").start,
+            span(spans, "presentation_time").length
+        ),
+        (4, 8)
+    );
     assert_eq!(span(spans, "id").start, 16);
 
     // v0 leads with variable-length strings, so offsets are unknown: no spans.

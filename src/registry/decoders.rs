@@ -368,10 +368,18 @@ impl BoxDecoder for HdlrDecoder {
         // pre_defined (4) + handler_type (4) + reserved (12) + name (rest).
         let mut spans = Vec::new();
         if payload_len >= 8 {
-            spans.push(FieldSpan { name: "handler_type".into(), start: 4, length: 4 });
+            spans.push(FieldSpan {
+                name: "handler_type".into(),
+                start: 4,
+                length: 4,
+            });
         }
         if payload_len > 20 {
-            spans.push(FieldSpan { name: "name".into(), start: 20, length: payload_len - 20 });
+            spans.push(FieldSpan {
+                name: "name".into(),
+                start: 20,
+                length: payload_len - 20,
+            });
         }
         spans
     }
@@ -629,7 +637,11 @@ impl BoxDecoder for SttsDecoder {
     }
 
     fn field_spans(&self, _: Option<u8>, _: Option<u32>, _: u64) -> Vec<FieldSpan> {
-        vec![FieldSpan { name: "entry_count".into(), start: 0, length: 4 }]
+        vec![FieldSpan {
+            name: "entry_count".into(),
+            start: 0,
+            length: 4,
+        }]
     }
 }
 
@@ -666,7 +678,11 @@ impl BoxDecoder for StssDecoder {
     }
 
     fn field_spans(&self, _: Option<u8>, _: Option<u32>, _: u64) -> Vec<FieldSpan> {
-        vec![FieldSpan { name: "entry_count".into(), start: 0, length: 4 }]
+        vec![FieldSpan {
+            name: "entry_count".into(),
+            start: 0,
+            length: 4,
+        }]
     }
 }
 
@@ -712,7 +728,11 @@ impl BoxDecoder for CttsDecoder {
     }
 
     fn field_spans(&self, _: Option<u8>, _: Option<u32>, _: u64) -> Vec<FieldSpan> {
-        vec![FieldSpan { name: "entry_count".into(), start: 0, length: 4 }]
+        vec![FieldSpan {
+            name: "entry_count".into(),
+            start: 0,
+            length: 4,
+        }]
     }
 }
 
@@ -756,7 +776,11 @@ impl BoxDecoder for StscDecoder {
     }
 
     fn field_spans(&self, _: Option<u8>, _: Option<u32>, _: u64) -> Vec<FieldSpan> {
-        vec![FieldSpan { name: "entry_count".into(), start: 0, length: 4 }]
+        vec![FieldSpan {
+            name: "entry_count".into(),
+            start: 0,
+            length: 4,
+        }]
     }
 }
 
@@ -899,7 +923,11 @@ impl BoxDecoder for StcoDecoder {
     }
 
     fn field_spans(&self, _: Option<u8>, _: Option<u32>, _: u64) -> Vec<FieldSpan> {
-        vec![FieldSpan { name: "entry_count".into(), start: 0, length: 4 }]
+        vec![FieldSpan {
+            name: "entry_count".into(),
+            start: 0,
+            length: 4,
+        }]
     }
 }
 
@@ -936,7 +964,11 @@ impl BoxDecoder for Co64Decoder {
     }
 
     fn field_spans(&self, _: Option<u8>, _: Option<u32>, _: u64) -> Vec<FieldSpan> {
-        vec![FieldSpan { name: "entry_count".into(), start: 0, length: 4 }]
+        vec![FieldSpan {
+            name: "entry_count".into(),
+            start: 0,
+            length: 4,
+        }]
     }
 }
 
@@ -980,7 +1012,11 @@ impl BoxDecoder for ElstDecoder {
     }
 
     fn field_spans(&self, _: Option<u8>, _: Option<u32>, _: u64) -> Vec<FieldSpan> {
-        vec![FieldSpan { name: "entry_count".into(), start: 0, length: 4 }]
+        vec![FieldSpan {
+            name: "entry_count".into(),
+            start: 0,
+            length: 4,
+        }]
     }
 }
 
@@ -2148,9 +2184,21 @@ impl BoxDecoder for TencDecoder {
             return Vec::new();
         }
         vec![
-            FieldSpan { name: "default_is_protected".into(), start: 2, length: 1 },
-            FieldSpan { name: "default_per_sample_iv_size".into(), start: 3, length: 1 },
-            FieldSpan { name: "default_kid".into(), start: 4, length: 16 },
+            FieldSpan {
+                name: "default_is_protected".into(),
+                start: 2,
+                length: 1,
+            },
+            FieldSpan {
+                name: "default_per_sample_iv_size".into(),
+                start: 3,
+                length: 1,
+            },
+            FieldSpan {
+                name: "default_kid".into(),
+                start: 4,
+                length: 16,
+            },
         ]
     }
 }
