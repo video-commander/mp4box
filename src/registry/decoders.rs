@@ -26,7 +26,6 @@ fn lang_from_u16(code: u16) -> String {
     format!("{}{}{}", c1 as char, c2 as char, c3 as char,)
 }
 
-
 // ---------- Decoders ----------
 
 // ftyp: major + minor + compatible brands

@@ -19,7 +19,6 @@ pub(crate) fn read_descriptor_length(buf: &[u8], pos: &mut usize) -> Option<u32>
     Some(length)
 }
 
-
 // ---------- AudioSpecificConfig (ISO 14496-3) ----------
 
 /// MSB-first bit reader over a byte slice.
