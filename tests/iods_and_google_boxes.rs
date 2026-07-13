@@ -87,5 +87,8 @@ fn google_boxes_are_recognized() {
         );
         assert_eq!(kb.full_name(), name);
     }
-    assert_eq!(KnownBox::from(FourCC(*b"iods")).full_name(), "Object Descriptor Box");
+    assert_eq!(
+        KnownBox::from(FourCC(*b"iods")).full_name(),
+        "Object Descriptor Box"
+    );
 }
