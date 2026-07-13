@@ -37,6 +37,23 @@ pub trait BoxDecoder: Send + Sync {
         version: Option<u8>,
         flags: Option<u32>,
     ) -> anyhow::Result<BoxValue>;
+
+    /// Byte ranges of this box's payload fields (payload-relative), for UIs
+    /// that highlight individual fields in a hex view. Computed deterministically
+    /// from the box's version/flags and payload length — no payload read
+    /// required, so it is cheap and independent of [`decode`](Self::decode).
+    ///
+    /// Defaults to empty: a decoder opts in by overriding this. Returning spans
+    /// for the fixed-layout header portion is enough; variable-length arrays
+    /// (sample tables) can be omitted.
+    fn field_spans(
+        &self,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+        _payload_len: u64,
+    ) -> Vec<FieldSpan> {
+        Vec::new()
+    }
 }
 
 /// Registry of decoders keyed by `BoxKey` (4CC or UUID).
@@ -88,6 +105,21 @@ impl Registry {
         self.map
             .get(key)
             .map(|d| d.inner.decode(r, hdr, version, flags))
+    }
+
+    /// Payload field spans for a box, or an empty vec if no decoder is
+    /// registered for the key or the decoder provides no field map.
+    pub fn field_spans(
+        &self,
+        key: &BoxKey,
+        version: Option<u8>,
+        flags: Option<u32>,
+        payload_len: u64,
+    ) -> Vec<FieldSpan> {
+        self.map
+            .get(key)
+            .map(|d| d.inner.field_spans(version, flags, payload_len))
+            .unwrap_or_default()
     }
 }
 

@@ -42,6 +42,9 @@ pub struct Box {
     pub decoded: Option<String>,
     /// Structured data if decode=true and structured decoder available
     pub structured_data: Option<crate::registry::StructuredData>,
+    /// Payload field byte ranges (payload-relative) when decode=true and the
+    /// decoder provides a field map; used to highlight fields in a hex view.
+    pub field_spans: Option<Vec<crate::registry::FieldSpan>>,
     /// Child boxes for container types
     pub children: Option<Vec<Box>>,
 }
@@ -222,23 +225,20 @@ fn payload_geometry(b: &BoxRef) -> Option<(u64, u64)> {
     }
 }
 
-fn decode_value<R: Read + Seek>(
-    r: &mut R,
-    b: &BoxRef,
-    reg: &Registry,
-) -> (Option<String>, Option<crate::registry::StructuredData>) {
+type DecodedValue = (
+    Option<String>,
+    Option<crate::registry::StructuredData>,
+    Vec<crate::registry::FieldSpan>,
+);
+
+fn decode_value<R: Read + Seek>(r: &mut R, b: &BoxRef, reg: &Registry) -> DecodedValue {
     let (key, off, len) = match payload_region(b) {
         Some(region) => region,
-        None => return (None, None),
+        None => return (None, None, Vec::new()),
     };
     if len == 0 {
-        return (None, None);
+        return (None, None, Vec::new());
     }
-
-    if r.seek(SeekFrom::Start(off)).is_err() {
-        return (None, None);
-    }
-    let mut limited = r.take(len);
 
     // Extract version and flags from the box if it's a FullBox
     let (version, flags) = match &b.kind {
@@ -249,16 +249,23 @@ fn decode_value<R: Read + Seek>(
         _ => (None, None),
     };
 
-    if let Some(res) = reg.decode(&key, &mut limited, &b.hdr, version, flags) {
-        match res {
-            Ok(BoxValue::Text(s)) => (Some(s), None),
-            Ok(BoxValue::Bytes(bytes)) => (Some(format!("{} bytes", bytes.len())), None),
-            Ok(BoxValue::Structured(data)) => (Some(data.summary()), Some(data)),
-            Err(e) => (Some(format!("[decode error: {}]", e)), None),
-        }
-    } else {
-        (None, None)
+    // Field spans are derived from metadata, not the payload bytes, so they are
+    // available even if the value decode below fails.
+    let spans = reg.field_spans(&key, version, flags, len);
+
+    if r.seek(SeekFrom::Start(off)).is_err() {
+        return (None, None, spans);
     }
+    let mut limited = r.take(len);
+
+    let (decoded, structured) = match reg.decode(&key, &mut limited, &b.hdr, version, flags) {
+        Some(Ok(BoxValue::Text(s))) => (Some(s), None),
+        Some(Ok(BoxValue::Bytes(bytes))) => (Some(format!("{} bytes", bytes.len())), None),
+        Some(Ok(BoxValue::Structured(data))) => (Some(data.summary()), Some(data)),
+        Some(Err(e)) => (Some(format!("[decode error: {}]", e)), None),
+        None => (None, None),
+    };
+    (decoded, structured, spans)
 }
 
 fn build_box<R: Read + Seek>(r: &mut R, b: &BoxRef, decode: bool, reg: &Registry) -> Box {
@@ -302,10 +309,10 @@ fn build_box<R: Read + Seek>(r: &mut R, b: &BoxRef, decode: bool, reg: &Registry
         }
     };
 
-    let (decoded, structured_data) = if decode {
+    let (decoded, structured_data, field_spans) = if decode {
         decode_value(r, b, reg)
     } else {
-        (None, None)
+        (None, None, Vec::new())
     };
 
     Box {
@@ -323,6 +330,7 @@ fn build_box<R: Read + Seek>(r: &mut R, b: &BoxRef, decode: bool, reg: &Registry
         full_name,
         decoded,
         structured_data,
+        field_spans: (!field_spans.is_empty()).then_some(field_spans),
         children,
     }
 }

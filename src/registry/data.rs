@@ -1,6 +1,21 @@
 //! Structured, serializable representations of decoded box payloads,
 //! plus [`StructuredData::summary`] for one-line rendering.
 
+/// Byte range of a single named field within a box's payload.
+///
+/// Offsets are payload-relative: `start = 0` is the first payload byte — i.e.
+/// the byte after the box header, and after the version+flags word for full
+/// boxes (the parser strips those before a decoder sees the payload). Consumers
+/// that highlight fields in a hex view over the whole box add the box's payload
+/// offset to map these into file/box coordinates. Spans need not be contiguous
+/// or cover the whole payload; reserved/matrix regions are simply omitted.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FieldSpan {
+    pub name: String,
+    pub start: u64,
+    pub length: u64,
+}
+
 /// Structured data for sample table boxes
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum StructuredData {

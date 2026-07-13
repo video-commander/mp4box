@@ -7,7 +7,7 @@
 //!
 //! All fixtures are built synthetically so the tests are self-contained.
 
-use mp4box::registry::StructuredData;
+use mp4box::registry::{FieldSpan, StructuredData};
 use mp4box::{Box, get_boxes, get_itunes_tags};
 use std::io::Cursor;
 
@@ -77,6 +77,259 @@ fn mvhd_v1_decodes_timescale_and_duration() {
     let boxes = parse(&data);
     let decoded = find(&boxes, "mvhd").decoded.as_deref().unwrap();
     assert_eq!(decoded, "timescale=90000 duration=8589934592");
+}
+
+fn span<'a>(spans: &'a [FieldSpan], name: &str) -> &'a FieldSpan {
+    spans
+        .iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("no span named {name}"))
+}
+
+#[test]
+fn mvhd_v0_field_spans_map_payload_bytes() {
+    let data = full_box(b"mvhd", 0, 0, &mvhd_v0_payload(600, 357884));
+    let boxes = parse(&data);
+    let mvhd = find(&boxes, "mvhd");
+    let spans = mvhd.field_spans.as_ref().expect("mvhd exposes field spans");
+
+    // v0: 4-byte times/duration, packed from the payload start.
+    for (name, start, len) in [
+        ("creation_time", 0, 4),
+        ("modification_time", 4, 4),
+        ("timescale", 8, 4),
+        ("duration", 12, 4),
+        ("rate", 16, 4),
+        ("volume", 20, 2),
+        ("next_track_id", 92, 4), // after the 70-byte reserved/matrix/pre_defined gap
+    ] {
+        let s = span(spans, name);
+        assert_eq!((s.start, s.length), (start, len), "span {name}");
+    }
+
+    // Spans stay within the payload the decoder actually consumed.
+    let payload = mvhd.payload_size.unwrap();
+    let last = span(spans, "next_track_id");
+    assert!(last.start + last.length <= payload);
+}
+
+#[test]
+fn mvhd_v1_field_spans_widen_to_64_bit() {
+    let mut p = Vec::new();
+    p.extend_from_slice(&0u64.to_be_bytes()); // creation_time
+    p.extend_from_slice(&0u64.to_be_bytes()); // modification_time
+    p.extend_from_slice(&90000u32.to_be_bytes());
+    p.extend_from_slice(&1u64.to_be_bytes()); // duration
+    p.extend_from_slice(&[0u8; 80]);
+    let data = full_box(b"mvhd", 1, 0, &p);
+    let boxes = parse(&data);
+    let spans = find(&boxes, "mvhd").field_spans.as_ref().unwrap();
+
+    for (name, start, len) in [
+        ("creation_time", 0, 8),
+        ("modification_time", 8, 8),
+        ("timescale", 16, 4),
+        ("duration", 20, 8),
+        ("rate", 28, 4),
+        ("volume", 32, 2),
+        ("next_track_id", 104, 4),
+    ] {
+        let s = span(spans, name);
+        assert_eq!((s.start, s.length), (start, len), "span {name}");
+    }
+}
+
+#[test]
+fn decoder_without_span_map_reports_none() {
+    // stz2 decodes to structured data but has no field_spans override (its
+    // compact body is not a fixed layout): the field is None, not an empty list.
+    let data = full_box(b"stz2", 0, 0, &[0, 0, 0, 8, 0, 0, 0, 0]); // field_size=8, count=0
+    let boxes = parse(&data);
+    let stz2 = find(&boxes, "stz2");
+    assert!(stz2.structured_data.is_some());
+    assert!(stz2.field_spans.is_none());
+}
+
+#[test]
+fn tkhd_field_spans_track_version_widths() {
+    // v0: 4-byte times/duration; width/height after the 52-byte reserved gap.
+    let v0 = parse(&full_box(b"tkhd", 0, 0, &tkhd_v0_payload(7, 48000, 1280, 720)));
+    let spans = find(&v0, "tkhd").field_spans.as_ref().unwrap();
+    for (name, start, len) in [
+        ("creation_time", 0, 4),
+        ("modification_time", 4, 4),
+        ("track_id", 8, 4),
+        ("duration", 16, 4),
+        ("width", 72, 4),
+        ("height", 76, 4),
+    ] {
+        let s = span(spans, name);
+        assert_eq!((s.start, s.length), (start, len), "v0 span {name}");
+    }
+
+    // v1 widens creation/modification/duration to 8 bytes, shifting the rest.
+    let mut p = Vec::new();
+    p.extend_from_slice(&0u64.to_be_bytes()); // creation_time
+    p.extend_from_slice(&0u64.to_be_bytes()); // modification_time
+    p.extend_from_slice(&42u32.to_be_bytes()); // track_id
+    p.extend_from_slice(&0u32.to_be_bytes()); // reserved
+    p.extend_from_slice(&1u64.to_be_bytes()); // duration
+    p.extend_from_slice(&[0u8; 8 + 8 + 36]);
+    p.extend_from_slice(&(1920u32 << 16).to_be_bytes());
+    p.extend_from_slice(&(1080u32 << 16).to_be_bytes());
+    let v1 = parse(&full_box(b"tkhd", 1, 0, &p));
+    let spans = find(&v1, "tkhd").field_spans.as_ref().unwrap();
+    assert_eq!((span(spans, "track_id").start, span(spans, "track_id").length), (16, 4));
+    assert_eq!((span(spans, "width").start, span(spans, "width").length), (84, 4));
+    assert_eq!(span(spans, "height").start, 88);
+}
+
+#[test]
+fn hdlr_field_spans_cover_type_and_variable_name() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&0u32.to_be_bytes()); // pre_defined
+    payload.extend_from_slice(b"vide"); // handler_type
+    payload.extend_from_slice(&[0u8; 12]); // reserved
+    payload.extend_from_slice(b"VideoHandler\0"); // name (13 bytes)
+    let payload_len = payload.len() as u64;
+    let boxes = parse(&full_box(b"hdlr", 0, 0, &payload));
+    let spans = find(&boxes, "hdlr").field_spans.as_ref().unwrap();
+
+    let ht = span(spans, "handler_type");
+    assert_eq!((ht.start, ht.length), (4, 4));
+    // The name span runs from the fixed prefix to the end of the payload.
+    let name = span(spans, "name");
+    assert_eq!(name.start, 20);
+    assert_eq!(name.start + name.length, payload_len);
+}
+
+#[test]
+fn tfhd_field_spans_follow_flag_bits() {
+    // flags select base_data_offset (0x1) + default_sample_duration (0x8) only.
+    let mut p = Vec::new();
+    p.extend_from_slice(&9u32.to_be_bytes()); // track_id
+    p.extend_from_slice(&0x1000u64.to_be_bytes()); // base_data_offset
+    p.extend_from_slice(&512u32.to_be_bytes()); // default_sample_duration
+    let boxes = parse(&full_box(b"tfhd", 0, 0x000009, &p));
+    let spans = find(&boxes, "tfhd").field_spans.as_ref().unwrap();
+
+    assert_eq!(spans.len(), 3);
+    assert_eq!((span(spans, "track_id").start, span(spans, "track_id").length), (0, 4));
+    assert_eq!((span(spans, "base_data_offset").start, span(spans, "base_data_offset").length), (4, 8));
+    assert_eq!(span(spans, "default_sample_duration").start, 12);
+    // Fields whose flag bit is clear are absent.
+    assert!(!spans.iter().any(|s| s.name == "default_sample_size"));
+}
+
+#[test]
+fn tenc_field_spans_locate_kid() {
+    let mut p = vec![0u8, 0, 1, 8]; // reserved, pattern, is_protected, iv_size
+    p.extend_from_slice(&[0xAB; 16]); // default_KID
+    let boxes = parse(&full_box(b"tenc", 0, 0, &p));
+    let spans = find(&boxes, "tenc").field_spans.as_ref().unwrap();
+    assert_eq!(span(spans, "default_is_protected").start, 2);
+    assert_eq!(span(spans, "default_per_sample_iv_size").start, 3);
+    let kid = span(spans, "default_kid");
+    assert_eq!((kid.start, kid.length), (4, 16));
+}
+
+#[test]
+fn mdhd_trex_tfdt_field_spans() {
+    // mdhd v0: contiguous 4-byte fields ending with a 2-byte language code.
+    let mut m = Vec::new();
+    m.extend_from_slice(&0u32.to_be_bytes()); // creation_time
+    m.extend_from_slice(&0u32.to_be_bytes()); // modification_time
+    m.extend_from_slice(&48000u32.to_be_bytes()); // timescale
+    m.extend_from_slice(&96000u32.to_be_bytes()); // duration
+    m.extend_from_slice(&0x55c4u16.to_be_bytes()); // language ("und")
+    m.extend_from_slice(&0u16.to_be_bytes()); // pre_defined
+    let mdhd = parse(&full_box(b"mdhd", 0, 0, &m));
+    let spans = find(&mdhd, "mdhd").field_spans.as_ref().unwrap();
+    assert_eq!(span(spans, "timescale").start, 8);
+    assert_eq!((span(spans, "language").start, span(spans, "language").length), (16, 2));
+
+    // trex: five packed u32s.
+    let trex = parse(&full_box(b"trex", 0, 0, &[0u8; 20]));
+    let spans = find(&trex, "trex").field_spans.as_ref().unwrap();
+    assert_eq!(span(spans, "track_id").start, 0);
+    assert_eq!(span(spans, "default_sample_flags").start, 16);
+
+    // tfdt v1 widens base_media_decode_time to 8 bytes.
+    let tfdt = parse(&full_box(b"tfdt", 1, 0, &[0u8; 8]));
+    let spans = find(&tfdt, "tfdt").field_spans.as_ref().unwrap();
+    let bmdt = span(spans, "base_media_decode_time");
+    assert_eq!((bmdt.start, bmdt.length), (0, 8));
+}
+
+#[test]
+fn sample_table_header_field_spans() {
+    // Sample tables span only their fixed header, not the repeating body.
+    let stco = parse(&full_box(b"stco", 0, 0, &0u32.to_be_bytes()));
+    let spans = find(&stco, "stco").field_spans.as_ref().unwrap();
+    assert_eq!((span(spans, "entry_count").start, span(spans, "entry_count").length), (0, 4));
+    assert_eq!(spans.len(), 1); // the offset array is not enumerated
+
+    // stsz leads with sample_size then sample_count.
+    let mut sz = Vec::new();
+    sz.extend_from_slice(&0u32.to_be_bytes()); // sample_size = 0 (per-sample)
+    sz.extend_from_slice(&0u32.to_be_bytes()); // sample_count = 0
+    let stsz = parse(&full_box(b"stsz", 0, 0, &sz));
+    let spans = find(&stsz, "stsz").field_spans.as_ref().unwrap();
+    assert_eq!(span(spans, "sample_size").start, 0);
+    assert_eq!((span(spans, "sample_count").start, span(spans, "sample_count").length), (4, 4));
+}
+
+#[test]
+fn sidx_field_spans_widen_and_trun_follows_flags() {
+    // sidx v0: reference_id, timescale, then 4-byte times.
+    let sidx0 = parse(&full_box(b"sidx", 0, 0, &[0u8; 20]));
+    let spans = find(&sidx0, "sidx").field_spans.as_ref().unwrap();
+    assert_eq!(span(spans, "reference_id").start, 0);
+    assert_eq!(span(spans, "timescale").start, 4);
+    assert_eq!(span(spans, "earliest_presentation_time").start, 8);
+    assert_eq!(span(spans, "first_offset").start, 12);
+
+    // sidx v1: the two time fields widen to 8 bytes, shifting first_offset.
+    let sidx1 = parse(&full_box(b"sidx", 1, 0, &[0u8; 28]));
+    let spans = find(&sidx1, "sidx").field_spans.as_ref().unwrap();
+    let fo = span(spans, "first_offset");
+    assert_eq!((fo.start, fo.length), (16, 8));
+
+    // trun with data-offset (0x1) and first-sample-flags (0x4) present.
+    let mut t = Vec::new();
+    t.extend_from_slice(&0u32.to_be_bytes()); // sample_count
+    t.extend_from_slice(&0i32.to_be_bytes()); // data_offset
+    t.extend_from_slice(&0u32.to_be_bytes()); // first_sample_flags
+    let trun = parse(&full_box(b"trun", 0, 0x000005, &t));
+    let spans = find(&trun, "trun").field_spans.as_ref().unwrap();
+    assert_eq!(span(spans, "sample_count").start, 0);
+    assert_eq!(span(spans, "data_offset").start, 4);
+    assert_eq!(span(spans, "first_sample_flags").start, 8);
+}
+
+#[test]
+fn emsg_field_spans_v1_only() {
+    // v1 leads with fixed fields, so they can be located.
+    let mut v1 = Vec::new();
+    v1.extend_from_slice(&1000u32.to_be_bytes()); // timescale
+    v1.extend_from_slice(&0u64.to_be_bytes()); // presentation_time
+    v1.extend_from_slice(&0u32.to_be_bytes()); // event_duration
+    v1.extend_from_slice(&0u32.to_be_bytes()); // id
+    v1.extend_from_slice(b"urn\0"); // scheme_id_uri
+    v1.extend_from_slice(b"\0"); // value
+    let boxes = parse(&full_box(b"emsg", 1, 0, &v1));
+    let spans = find(&boxes, "emsg").field_spans.as_ref().unwrap();
+    assert_eq!(span(spans, "timescale").start, 0);
+    assert_eq!((span(spans, "presentation_time").start, span(spans, "presentation_time").length), (4, 8));
+    assert_eq!(span(spans, "id").start, 16);
+
+    // v0 leads with variable-length strings, so offsets are unknown: no spans.
+    let mut v0 = Vec::new();
+    v0.extend_from_slice(b"urn\0"); // scheme_id_uri
+    v0.extend_from_slice(b"\0"); // value
+    v0.extend_from_slice(&[0u8; 16]); // timescale..id
+    let boxes = parse(&full_box(b"emsg", 0, 0, &v0));
+    assert!(find(&boxes, "emsg").field_spans.is_none());
 }
 
 // ---------- tkhd ----------

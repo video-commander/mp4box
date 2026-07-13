@@ -816,6 +816,7 @@ mod tests {
             full_name: "Track Header Box".to_string(),
             decoded: None,
             structured_data: Some(StructuredData::TrackHeader(tkhd_data)),
+            field_spans: None,
             children: None,
         };
 
@@ -833,6 +834,7 @@ mod tests {
             full_name: "Track Box".to_string(),
             decoded: None,
             structured_data: None,
+            field_spans: None,
             children: Some(vec![tkhd_box]),
         };
 
@@ -868,6 +870,7 @@ mod tests {
                 full_name: "Track Header Box".to_string(),
                 decoded: None,
                 structured_data: Some(StructuredData::TrackHeader(tkhd_data)),
+                field_spans: None,
                 children: None,
             };
 
@@ -885,6 +888,7 @@ mod tests {
                 full_name: "Track Box".to_string(),
                 decoded: None,
                 structured_data: None,
+                field_spans: None,
                 children: Some(vec![tkhd_box]),
             };
 
@@ -910,6 +914,7 @@ mod tests {
             full_name: "Track Box".to_string(),
             decoded: None,
             structured_data: None,
+            field_spans: None,
             children: Some(vec![]),
         };
 

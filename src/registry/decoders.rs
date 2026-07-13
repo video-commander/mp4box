@@ -16,6 +16,19 @@ fn read_all(r: &mut dyn Read) -> anyhow::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Appends a payload-relative field span of `len` bytes at `*pos`, then
+/// advances `*pos` past it. Used by `field_spans` impls to lay out fields in
+/// declaration order.
+fn span(name: &str, len: u64, pos: &mut u64) -> FieldSpan {
+    let s = FieldSpan {
+        name: name.to_string(),
+        start: *pos,
+        length: len,
+    };
+    *pos += len;
+    s
+}
+
 fn lang_from_u16(code: u16) -> String {
     if code == 0 {
         return "und".to_string();
@@ -117,6 +130,31 @@ impl BoxDecoder for MvhdDecoder {
             },
         )))
     }
+
+    fn field_spans(
+        &self,
+        version: Option<u8>,
+        _flags: Option<u32>,
+        _payload_len: u64,
+    ) -> Vec<FieldSpan> {
+        // Widths mirror the decode() layout above: version 1 stores the
+        // times/duration as 64-bit, version 0 as 32-bit.
+        let time_w: u64 = if version == Some(1) { 8 } else { 4 };
+        let dur_w: u64 = if version == Some(1) { 8 } else { 4 };
+        let mut pos = 0u64;
+        let mut spans = vec![
+            span("creation_time", time_w, &mut pos),
+            span("modification_time", time_w, &mut pos),
+            span("timescale", 4, &mut pos),
+            span("duration", dur_w, &mut pos),
+            span("rate", 4, &mut pos),
+            span("volume", 2, &mut pos),
+        ];
+        // reserved (10) + matrix (36) + pre_defined (24) are unnamed padding.
+        pos += 10 + 36 + 24;
+        spans.push(span("next_track_id", 4, &mut pos));
+        spans
+    }
 }
 
 // tkhd: track id, duration, width, height
@@ -193,6 +231,28 @@ impl BoxDecoder for TkhdDecoder {
 
         Ok(BoxValue::Structured(StructuredData::TrackHeader(data)))
     }
+
+    fn field_spans(
+        &self,
+        version: Option<u8>,
+        _flags: Option<u32>,
+        _payload_len: u64,
+    ) -> Vec<FieldSpan> {
+        let (time_w, dur_w): (u64, u64) = if version == Some(1) { (8, 8) } else { (4, 4) };
+        let mut pos = 0u64;
+        let mut spans = vec![
+            span("creation_time", time_w, &mut pos),
+            span("modification_time", time_w, &mut pos),
+            span("track_id", 4, &mut pos),
+        ];
+        pos += 4; // reserved
+        spans.push(span("duration", dur_w, &mut pos));
+        // reserved[2] (8) + layer/alternate_group/volume/reserved (8) + matrix (36)
+        pos += 8 + 8 + 36;
+        spans.push(span("width", 4, &mut pos));
+        spans.push(span("height", 4, &mut pos));
+        spans
+    }
 }
 
 // mdhd: timescale, duration, language
@@ -237,6 +297,23 @@ impl BoxDecoder for MdhdDecoder {
 
         Ok(BoxValue::Structured(StructuredData::MediaHeader(data)))
     }
+
+    fn field_spans(
+        &self,
+        version: Option<u8>,
+        _flags: Option<u32>,
+        _payload_len: u64,
+    ) -> Vec<FieldSpan> {
+        let (time_w, dur_w): (u64, u64) = if version == Some(1) { (8, 8) } else { (4, 4) };
+        let mut pos = 0u64;
+        vec![
+            span("creation_time", time_w, &mut pos),
+            span("modification_time", time_w, &mut pos),
+            span("timescale", 4, &mut pos),
+            span("duration", dur_w, &mut pos),
+            span("language", 2, &mut pos),
+        ]
+    }
 }
 
 // hdlr: handler type + name
@@ -280,6 +357,23 @@ impl BoxDecoder for HdlrDecoder {
         };
 
         Ok(BoxValue::Structured(StructuredData::HandlerReference(data)))
+    }
+
+    fn field_spans(
+        &self,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+        payload_len: u64,
+    ) -> Vec<FieldSpan> {
+        // pre_defined (4) + handler_type (4) + reserved (12) + name (rest).
+        let mut spans = Vec::new();
+        if payload_len >= 8 {
+            spans.push(FieldSpan { name: "handler_type".into(), start: 4, length: 4 });
+        }
+        if payload_len > 20 {
+            spans.push(FieldSpan { name: "name".into(), start: 20, length: payload_len - 20 });
+        }
+        spans
     }
 }
 
@@ -335,6 +429,24 @@ impl BoxDecoder for SidxDecoder {
                 references,
             },
         )))
+    }
+
+    fn field_spans(
+        &self,
+        version: Option<u8>,
+        _flags: Option<u32>,
+        _payload_len: u64,
+    ) -> Vec<FieldSpan> {
+        // earliest_presentation_time and first_offset widen to 64-bit in v1;
+        // the reference array (after reserved + reference_count) is omitted.
+        let w: u64 = if version == Some(1) { 8 } else { 4 };
+        let mut pos = 0u64;
+        vec![
+            span("reference_id", 4, &mut pos),
+            span("timescale", 4, &mut pos),
+            span("earliest_presentation_time", w, &mut pos),
+            span("first_offset", w, &mut pos),
+        ]
     }
 }
 
@@ -515,6 +627,10 @@ impl BoxDecoder for SttsDecoder {
             data,
         )))
     }
+
+    fn field_spans(&self, _: Option<u8>, _: Option<u32>, _: u64) -> Vec<FieldSpan> {
+        vec![FieldSpan { name: "entry_count".into(), start: 0, length: 4 }]
+    }
 }
 
 // stss: sync sample table
@@ -547,6 +663,10 @@ impl BoxDecoder for StssDecoder {
         };
 
         Ok(BoxValue::Structured(StructuredData::SyncSample(data)))
+    }
+
+    fn field_spans(&self, _: Option<u8>, _: Option<u32>, _: u64) -> Vec<FieldSpan> {
+        vec![FieldSpan { name: "entry_count".into(), start: 0, length: 4 }]
     }
 }
 
@@ -590,6 +710,10 @@ impl BoxDecoder for CttsDecoder {
             StructuredData::CompositionTimeToSample(data),
         ))
     }
+
+    fn field_spans(&self, _: Option<u8>, _: Option<u32>, _: u64) -> Vec<FieldSpan> {
+        vec![FieldSpan { name: "entry_count".into(), start: 0, length: 4 }]
+    }
 }
 
 // stsc: sample-to-chunk
@@ -630,6 +754,10 @@ impl BoxDecoder for StscDecoder {
 
         Ok(BoxValue::Structured(StructuredData::SampleToChunk(data)))
     }
+
+    fn field_spans(&self, _: Option<u8>, _: Option<u32>, _: u64) -> Vec<FieldSpan> {
+        vec![FieldSpan { name: "entry_count".into(), start: 0, length: 4 }]
+    }
 }
 
 // stsz: sample sizes
@@ -667,6 +795,14 @@ impl BoxDecoder for StszDecoder {
         };
 
         Ok(BoxValue::Structured(StructuredData::SampleSize(data)))
+    }
+
+    fn field_spans(&self, _: Option<u8>, _: Option<u32>, _: u64) -> Vec<FieldSpan> {
+        let mut pos = 0u64;
+        vec![
+            span("sample_size", 4, &mut pos),
+            span("sample_count", 4, &mut pos),
+        ]
     }
 }
 
@@ -761,6 +897,10 @@ impl BoxDecoder for StcoDecoder {
 
         Ok(BoxValue::Structured(StructuredData::ChunkOffset(data)))
     }
+
+    fn field_spans(&self, _: Option<u8>, _: Option<u32>, _: u64) -> Vec<FieldSpan> {
+        vec![FieldSpan { name: "entry_count".into(), start: 0, length: 4 }]
+    }
 }
 
 // co64: 64-bit chunk offsets
@@ -793,6 +933,10 @@ impl BoxDecoder for Co64Decoder {
         };
 
         Ok(BoxValue::Structured(StructuredData::ChunkOffset64(data)))
+    }
+
+    fn field_spans(&self, _: Option<u8>, _: Option<u32>, _: u64) -> Vec<FieldSpan> {
+        vec![FieldSpan { name: "entry_count".into(), start: 0, length: 4 }]
     }
 }
 
@@ -833,6 +977,10 @@ impl BoxDecoder for ElstDecoder {
             entry_count,
             entries,
         })))
+    }
+
+    fn field_spans(&self, _: Option<u8>, _: Option<u32>, _: u64) -> Vec<FieldSpan> {
+        vec![FieldSpan { name: "entry_count".into(), start: 0, length: 4 }]
     }
 }
 
@@ -1650,6 +1798,26 @@ impl BoxDecoder for TrunDecoder {
             },
         )))
     }
+
+    fn field_spans(
+        &self,
+        _version: Option<u8>,
+        flags: Option<u32>,
+        _payload_len: u64,
+    ) -> Vec<FieldSpan> {
+        // The per-sample array is omitted; only the header fields, which are
+        // flag-gated like decode() above.
+        let fl = flags.unwrap_or(0);
+        let mut pos = 0u64;
+        let mut spans = vec![span("sample_count", 4, &mut pos)];
+        if fl & 0x000001 != 0 {
+            spans.push(span("data_offset", 4, &mut pos));
+        }
+        if fl & 0x000004 != 0 {
+            spans.push(span("first_sample_flags", 4, &mut pos));
+        }
+        spans
+    }
 }
 
 // tfhd: track fragment header (FullBox)
@@ -1706,6 +1874,35 @@ impl BoxDecoder for TfhdDecoder {
             },
         )))
     }
+
+    fn field_spans(
+        &self,
+        _version: Option<u8>,
+        flags: Option<u32>,
+        _payload_len: u64,
+    ) -> Vec<FieldSpan> {
+        // Optional fields are present only when their flag bit is set; widths
+        // and order mirror decode() above.
+        let fl = flags.unwrap_or(0);
+        let mut pos = 0u64;
+        let mut spans = vec![span("track_id", 4, &mut pos)];
+        if fl & 0x000001 != 0 {
+            spans.push(span("base_data_offset", 8, &mut pos));
+        }
+        if fl & 0x000002 != 0 {
+            spans.push(span("sample_description_index", 4, &mut pos));
+        }
+        if fl & 0x000008 != 0 {
+            spans.push(span("default_sample_duration", 4, &mut pos));
+        }
+        if fl & 0x000010 != 0 {
+            spans.push(span("default_sample_size", 4, &mut pos));
+        }
+        if fl & 0x000020 != 0 {
+            spans.push(span("default_sample_flags", 4, &mut pos));
+        }
+        spans
+    }
 }
 
 // tfdt: track fragment decode time (FullBox)
@@ -1733,6 +1930,17 @@ impl BoxDecoder for TfdtDecoder {
             }),
         ))
     }
+
+    fn field_spans(
+        &self,
+        version: Option<u8>,
+        _flags: Option<u32>,
+        _payload_len: u64,
+    ) -> Vec<FieldSpan> {
+        let width: u64 = if version == Some(1) { 8 } else { 4 };
+        let mut pos = 0u64;
+        vec![span("base_media_decode_time", width, &mut pos)]
+    }
 }
 
 // trex: track extends (FullBox)
@@ -1755,6 +1963,22 @@ impl BoxDecoder for TrexDecoder {
                 default_sample_flags: r.read_u32_be()?,
             },
         )))
+    }
+
+    fn field_spans(
+        &self,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+        _payload_len: u64,
+    ) -> Vec<FieldSpan> {
+        let mut pos = 0u64;
+        vec![
+            span("track_id", 4, &mut pos),
+            span("default_sample_description_index", 4, &mut pos),
+            span("default_sample_duration", 4, &mut pos),
+            span("default_sample_size", 4, &mut pos),
+            span("default_sample_flags", 4, &mut pos),
+        ]
     }
 }
 
@@ -1910,6 +2134,25 @@ impl BoxDecoder for TencDecoder {
             },
         )))
     }
+
+    fn field_spans(
+        &self,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+        payload_len: u64,
+    ) -> Vec<FieldSpan> {
+        // reserved (1) + crypt/skip pattern byte (1) then the fixed fields. The
+        // trailing constant_iv is conditional on values only known by reading,
+        // so it is omitted.
+        if payload_len < 20 {
+            return Vec::new();
+        }
+        vec![
+            FieldSpan { name: "default_is_protected".into(), start: 2, length: 1 },
+            FieldSpan { name: "default_per_sample_iv_size".into(), start: 3, length: 1 },
+            FieldSpan { name: "default_kid".into(), start: 4, length: 16 },
+        ]
+    }
 }
 
 // senc: sample encryption (FullBox). Per-sample IVs cannot be parsed without
@@ -2047,6 +2290,26 @@ impl BoxDecoder for EmsgDecoder {
         };
 
         Ok(BoxValue::Structured(StructuredData::EventMessage(data)))
+    }
+
+    fn field_spans(
+        &self,
+        version: Option<u8>,
+        _flags: Option<u32>,
+        _payload_len: u64,
+    ) -> Vec<FieldSpan> {
+        // Only version 1 has its fixed fields first; version 0 leads with
+        // variable-length strings, so its field offsets aren't known here.
+        if version != Some(1) {
+            return Vec::new();
+        }
+        let mut pos = 0u64;
+        vec![
+            span("timescale", 4, &mut pos),
+            span("presentation_time", 8, &mut pos),
+            span("event_duration", 4, &mut pos),
+            span("id", 4, &mut pos),
+        ]
     }
 }
 
