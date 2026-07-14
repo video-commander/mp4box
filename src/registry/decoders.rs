@@ -1,6 +1,7 @@
 //! Box payload decoders. Each `*Decoder` implements
 //! [`BoxDecoder`](super::BoxDecoder) for one box type.
 
+use super::cicp;
 use super::codec_config::{parse_audio_specific_config, read_descriptor_length};
 use super::data::*;
 use super::{BoxDecoder, BoxValue};
@@ -1339,6 +1340,68 @@ impl BoxDecoder for Av1cDecoder {
     }
 }
 
+// dvcC / dvvC: Dolby Vision configuration record.
+//
+// DOVIDecoderConfigurationRecord (Dolby Vision streams spec, section 3.2):
+//   u8  dv_version_major
+//   u8  dv_version_minor
+//   u7  dv_profile
+//   u6  dv_level
+//   u1  rpu_present_flag
+//   u1  el_present_flag
+//   u1  bl_present_flag
+//   u4  dv_bl_signal_compatibility_id
+//   (reserved padding to 24 bytes)
+pub struct DvccDecoder;
+
+/// Cross-compatibility of the base layer with non-Dolby-Vision decoders,
+/// per `dv_bl_signal_compatibility_id`.
+fn dv_compatibility_name(id: u8) -> &'static str {
+    match id {
+        0 => "none",
+        1 => "HDR10 (BT.2020 PQ)",
+        2 => "SDR (BT.709)",
+        4 => "HLG (BT.2020)",
+        6 => "BT.2100 (HDR10/HLG)",
+        _ => "reserved",
+    }
+}
+
+impl BoxDecoder for DvccDecoder {
+    fn decode(
+        &self,
+        r: &mut dyn Read,
+        _hdr: &BoxHeader,
+        _version: Option<u8>,
+        _flags: Option<u32>,
+    ) -> anyhow::Result<BoxValue> {
+        let buf = read_all(r)?;
+        if buf.len() < 5 {
+            return Ok(BoxValue::Bytes(buf));
+        }
+        let dv_version_major = buf[0];
+        let dv_version_minor = buf[1];
+        let dv_profile = buf[2] >> 1;
+        let dv_level = ((buf[2] & 0x01) << 5) | (buf[3] >> 3);
+        let rpu_present = (buf[3] >> 2) & 1;
+        let el_present = (buf[3] >> 1) & 1;
+        let bl_present = buf[3] & 1;
+        let compat_id = buf[4] >> 4;
+        Ok(BoxValue::Text(format!(
+            "version={}.{} profile={} level={} rpu_present={} el_present={} bl_present={} bl_compatibility={} ({})",
+            dv_version_major,
+            dv_version_minor,
+            dv_profile,
+            dv_level,
+            rpu_present,
+            el_present,
+            bl_present,
+            compat_id,
+            dv_compatibility_name(compat_id),
+        )))
+    }
+}
+
 // vpcC: VP codec configuration (FullBox version=1)
 pub struct VpccDecoder;
 
@@ -1356,9 +1419,9 @@ impl BoxDecoder for VpccDecoder {
         let bit_depth = (byte3 >> 4) & 0x0F;
         let chroma_subsampling = (byte3 >> 1) & 0x07;
         let full_range = byte3 & 0x01;
-        let colour_primaries = r.read_u8()?;
-        let transfer = r.read_u8()?;
-        let matrix = r.read_u8()?;
+        let colour_primaries = r.read_u8()? as u16;
+        let transfer = r.read_u8()? as u16;
+        let matrix = r.read_u8()? as u16;
         Ok(BoxValue::Text(format!(
             "profile={} level={} bit_depth={} chroma={} full_range={} primaries={} transfer={} matrix={}",
             profile,
@@ -1366,9 +1429,9 @@ impl BoxDecoder for VpccDecoder {
             bit_depth,
             chroma_subsampling,
             full_range,
-            colour_primaries,
-            transfer,
-            matrix
+            cicp::labeled(colour_primaries, cicp::primaries_name(colour_primaries)),
+            cicp::labeled(transfer, cicp::transfer_name(transfer)),
+            cicp::labeled(matrix, cicp::matrix_name(matrix))
         )))
     }
 }
@@ -1519,7 +1582,10 @@ impl BoxDecoder for ColrDecoder {
             let full_range = (buf[10] >> 7) & 1;
             Ok(BoxValue::Text(format!(
                 "type=nclx primaries={} transfer={} matrix={} full_range={}",
-                primaries, transfer, matrix, full_range
+                cicp::labeled(primaries, cicp::primaries_name(primaries)),
+                cicp::labeled(transfer, cicp::transfer_name(transfer)),
+                cicp::labeled(matrix, cicp::matrix_name(matrix)),
+                full_range
             )))
         } else {
             Ok(BoxValue::Text(format!(

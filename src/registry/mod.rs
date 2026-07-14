@@ -8,6 +8,7 @@ use crate::boxes::{BoxHeader, BoxKey, FourCC};
 use std::collections::HashMap;
 use std::io::Read;
 
+pub mod cicp;
 mod codec_config;
 mod data;
 mod decoders;
@@ -241,6 +242,16 @@ pub fn default_registry() -> Registry {
             BoxKey::FourCC(FourCC(*b"vpcC")),
             "vpcC",
             Box::new(VpccDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"dvcC")),
+            "dvcC",
+            Box::new(DvccDecoder),
+        )
+        .with_decoder(
+            BoxKey::FourCC(FourCC(*b"dvvC")),
+            "dvvC",
+            Box::new(DvccDecoder),
         )
         .with_decoder(
             BoxKey::FourCC(FourCC(*b"dOps")),

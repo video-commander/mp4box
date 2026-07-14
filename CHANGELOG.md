@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Human-readable CICP colour code points.** The `colr` (nclx) and `vpcC`
+  decoders now name the colour primaries, transfer characteristics, and matrix
+  coefficients (ISO/IEC 23091-2) instead of printing bare integers — e.g.
+  `transfer=16 (PQ / SMPTE ST 2084)` and `transfer=18 (HLG / ARIB STD-B67)`,
+  making HDR signalling legible at a glance. Lookup tables are exposed at
+  `registry::cicp` for reuse.
+- **`dvcC` / `dvvC` (Dolby Vision Configuration Box) decoding.** Both records
+  are now decoded into `dv_version`, `dv_profile`, `dv_level`, the
+  RPU/EL/BL presence flags, and the base-layer cross-compatibility id with its
+  meaning (e.g. `bl_compatibility=1 (HDR10 (BT.2020 PQ))`). `dvvC` is also newly
+  recognized as a known box.
+
 ## [0.11.0]
 
 ### Added

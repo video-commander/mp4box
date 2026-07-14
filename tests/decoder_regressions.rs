@@ -981,3 +981,58 @@ fn esds_plain_aac_without_dsi_still_decodes() {
     assert_eq!(d.object_type_name, "MP3");
     assert!(d.audio_config.is_none());
 }
+
+// ---------- HDR / colour metadata (0.12) ----------
+
+#[test]
+fn colr_nclx_names_hdr10_code_points() {
+    // BT.2020 primaries (9), PQ transfer (16), BT.2020-NCL matrix (9), full range.
+    let mut p = Vec::new();
+    p.extend_from_slice(b"nclx");
+    p.extend_from_slice(&9u16.to_be_bytes());
+    p.extend_from_slice(&16u16.to_be_bytes());
+    p.extend_from_slice(&9u16.to_be_bytes());
+    p.push(0x80); // full_range = 1
+    let boxes = parse(&plain_box(b"colr", &p));
+    let decoded = find(&boxes, "colr").decoded.as_deref().unwrap();
+    assert_eq!(
+        decoded,
+        "type=nclx primaries=9 (BT.2020) transfer=16 (PQ / SMPTE ST 2084) \
+         matrix=9 (BT.2020 non-constant luminance) full_range=1"
+    );
+}
+
+#[test]
+fn colr_nclx_hlg_transfer_named() {
+    let mut p = Vec::new();
+    p.extend_from_slice(b"nclx");
+    p.extend_from_slice(&9u16.to_be_bytes());
+    p.extend_from_slice(&18u16.to_be_bytes()); // HLG
+    p.extend_from_slice(&9u16.to_be_bytes());
+    p.push(0x00);
+    let boxes = parse(&plain_box(b"colr", &p));
+    let decoded = find(&boxes, "colr").decoded.as_deref().unwrap();
+    assert!(decoded.contains("transfer=18 (HLG / ARIB STD-B67)"), "{decoded}");
+}
+
+#[test]
+fn dvcc_decodes_profile_and_compatibility() {
+    // Profile 8, level 6, RPU+BL present, EL absent, compatibility id 1 (HDR10).
+    let mut p = Vec::new();
+    p.push(1); // dv_version_major
+    p.push(0); // dv_version_minor
+    // dv_profile=8 (7 bits) then dv_level=6 (6 bits): top byte = 8<<1 | (6>>5)=0x10
+    p.push(0x10);
+    // remaining 5 bits of level (6 = 00110) then rpu=1, el=0, bl=1
+    // 0b00110_101 = 0x35
+    p.push(0x35);
+    p.push(0x10); // compat id = 1 in top nibble
+    p.extend_from_slice(&[0u8; 19]); // reserved to 24 bytes
+    let boxes = parse(&plain_box(b"dvcC", &p));
+    let decoded = find(&boxes, "dvcC").decoded.as_deref().unwrap();
+    assert_eq!(
+        decoded,
+        "version=1.0 profile=8 level=6 rpu_present=1 el_present=0 bl_present=1 \
+         bl_compatibility=1 (HDR10 (BT.2020 PQ))"
+    );
+}

@@ -175,6 +175,7 @@ pub enum KnownBox {
     Dec3,
     Dfla,
     Dvcc,
+    Dvvc,
     Btrt,
 
     // iTunes metadata
@@ -399,6 +400,7 @@ impl From<FourCC> for KnownBox {
             b"dec3" => KnownBox::Dec3,
             b"dfLa" => KnownBox::Dfla,
             b"dvcC" => KnownBox::Dvcc,
+            b"dvvC" => KnownBox::Dvvc,
             b"btrt" => KnownBox::Btrt,
 
             b"ilst" => KnownBox::Ilst,
@@ -728,6 +730,7 @@ impl KnownBox {
             KnownBox::Dec3 => "Enhanced AC-3 Bitstream Information Box",
             KnownBox::Dfla => "FLAC Specific Box",
             KnownBox::Dvcc => "Dolby Vision Configuration Box",
+            KnownBox::Dvvc => "Dolby Vision Configuration Box (dvvC)",
             KnownBox::Btrt => "Bitrate Box",
             KnownBox::Ilst => "iTunes Metadata List",
             KnownBox::IlstData => "iTunes Metadata Value",
