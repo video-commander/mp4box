@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RPU/EL/BL presence flags, and the base-layer cross-compatibility id with its
   meaning (e.g. `bl_compatibility=1 (HDR10 (BT.2020 PQ))`). `dvvC` is also newly
   recognized as a known box.
+- **Structured HDR/colour metadata.** The `colr`, `dvcC`/`dvvC`, `mdcv`, and
+  `clli` decoders now expose typed data (`StructuredData::ColourInformation`,
+  `DolbyVisionConfig`, `MasteringDisplayColourVolume`, `ContentLightLevel`)
+  instead of only a text summary, so callers can read the fields directly and
+  UIs render them as attribute lists. Text summaries are unchanged.
 
 ## [0.11.0]
 

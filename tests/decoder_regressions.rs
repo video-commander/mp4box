@@ -994,12 +994,18 @@ fn colr_nclx_names_hdr10_code_points() {
     p.extend_from_slice(&9u16.to_be_bytes());
     p.push(0x80); // full_range = 1
     let boxes = parse(&plain_box(b"colr", &p));
-    let decoded = find(&boxes, "colr").decoded.as_deref().unwrap();
+    let colr = find(&boxes, "colr");
     assert_eq!(
-        decoded,
+        colr.decoded.as_deref().unwrap(),
         "type=nclx primaries=9 (BT.2020) transfer=16 (PQ / SMPTE ST 2084) \
          matrix=9 (BT.2020 non-constant luminance) full_range=1"
     );
+    let Some(StructuredData::ColourInformation(d)) = &colr.structured_data else {
+        panic!("expected ColourInformation, got {:?}", colr.structured_data);
+    };
+    assert_eq!(d.transfer, Some(16));
+    assert_eq!(d.transfer_name.as_deref(), Some("PQ / SMPTE ST 2084"));
+    assert_eq!(d.full_range, Some(true));
 }
 
 #[test]
@@ -1018,21 +1024,24 @@ fn colr_nclx_hlg_transfer_named() {
 #[test]
 fn dvcc_decodes_profile_and_compatibility() {
     // Profile 8, level 6, RPU+BL present, EL absent, compatibility id 1 (HDR10).
-    let mut p = Vec::new();
-    p.push(1); // dv_version_major
-    p.push(0); // dv_version_minor
-    // dv_profile=8 (7 bits) then dv_level=6 (6 bits): top byte = 8<<1 | (6>>5)=0x10
-    p.push(0x10);
-    // remaining 5 bits of level (6 = 00110) then rpu=1, el=0, bl=1
-    // 0b00110_101 = 0x35
-    p.push(0x35);
-    p.push(0x10); // compat id = 1 in top nibble
+    // Byte 2: dv_profile=8 (7 bits) then top bit of dv_level=6 → 8<<1 | (6>>5) = 0x10.
+    // Byte 3: low 5 bits of level (0b00110) then rpu=1, el=0, bl=1 → 0b00110_101 = 0x35.
+    // Byte 4: compat id = 1 in the top nibble → 0x10.
+    let mut p = vec![1, 0, 0x10, 0x35, 0x10];
     p.extend_from_slice(&[0u8; 19]); // reserved to 24 bytes
     let boxes = parse(&plain_box(b"dvcC", &p));
-    let decoded = find(&boxes, "dvcC").decoded.as_deref().unwrap();
+    let dvcc = find(&boxes, "dvcC");
     assert_eq!(
-        decoded,
+        dvcc.decoded.as_deref().unwrap(),
         "version=1.0 profile=8 level=6 rpu_present=1 el_present=0 bl_present=1 \
          bl_compatibility=1 (HDR10 (BT.2020 PQ))"
     );
+    let Some(StructuredData::DolbyVisionConfig(d)) = &dvcc.structured_data else {
+        panic!("expected DolbyVisionConfig, got {:?}", dvcc.structured_data);
+    };
+    assert_eq!(d.dv_profile, 8);
+    assert_eq!(d.dv_level, 6);
+    assert!(d.rpu_present && d.bl_present && !d.el_present);
+    assert_eq!(d.bl_signal_compatibility_id, 1);
+    assert_eq!(d.bl_signal_compatibility, "HDR10 (BT.2020 PQ)");
 }

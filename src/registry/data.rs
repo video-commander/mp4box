@@ -65,6 +65,14 @@ pub enum StructuredData {
     ElementaryStream(EsdsData),
     /// Object Descriptor Box (iods)
     ObjectDescriptor(IodsData),
+    /// Colour Information Box (colr)
+    ColourInformation(ColrData),
+    /// Dolby Vision Configuration Box (dvcC / dvvC)
+    DolbyVisionConfig(DoviConfigData),
+    /// Mastering Display Colour Volume Box (mdcv)
+    MasteringDisplayColourVolume(MdcvData),
+    /// Content Light Level Information Box (clli)
+    ContentLightLevel(ClliData),
 }
 
 /// Elementary Stream Descriptor data (esds, ISO 14496-1/-3)
@@ -443,6 +451,53 @@ impl StructuredData {
                 }
                 s
             }
+            StructuredData::ColourInformation(d) => {
+                if d.colour_type == "nclx" {
+                    let lab = |v: Option<u16>, n: &Option<String>| match (v, n) {
+                        (Some(v), Some(n)) => format!("{v} ({n})"),
+                        (Some(v), None) => v.to_string(),
+                        _ => "?".to_string(),
+                    };
+                    format!(
+                        "type=nclx primaries={} transfer={} matrix={} full_range={}",
+                        lab(d.primaries, &d.primaries_name),
+                        lab(d.transfer, &d.transfer_name),
+                        lab(d.matrix, &d.matrix_name),
+                        d.full_range.map(u8::from).unwrap_or(0)
+                    )
+                } else {
+                    format!("type={}", d.colour_type)
+                }
+            }
+            StructuredData::DolbyVisionConfig(d) => format!(
+                "version={}.{} profile={} level={} rpu_present={} el_present={} bl_present={} bl_compatibility={} ({})",
+                d.dv_version_major,
+                d.dv_version_minor,
+                d.dv_profile,
+                d.dv_level,
+                u8::from(d.rpu_present),
+                u8::from(d.el_present),
+                u8::from(d.bl_present),
+                d.bl_signal_compatibility_id,
+                d.bl_signal_compatibility,
+            ),
+            StructuredData::MasteringDisplayColourVolume(d) => format!(
+                "R({},{}) G({},{}) B({},{}) W({},{}) max_luminance={:.4} min_luminance={:.4} cd/m2",
+                d.red_x,
+                d.red_y,
+                d.green_x,
+                d.green_y,
+                d.blue_x,
+                d.blue_y,
+                d.white_x,
+                d.white_y,
+                d.max_display_mastering_luminance,
+                d.min_display_mastering_luminance,
+            ),
+            StructuredData::ContentLightLevel(d) => format!(
+                "max_cll={} max_fall={}",
+                d.max_content_light_level, d.max_pic_average_light_level
+            ),
         }
     }
 }
@@ -701,4 +756,71 @@ pub struct TrunSample {
     pub size: Option<u32>,
     pub flags: Option<u32>,
     pub composition_time_offset: Option<i32>,
+}
+
+/// Colour Information Box data (colr).
+///
+/// For `nclx` the CICP code points are captured with their human-readable
+/// names (see [`crate::registry::cicp`]); `transfer` in particular signals HDR
+/// (16 = PQ, 18 = HLG). Other colour types (`nclc`, `prof`, `rICC`) carry only
+/// the `colour_type` tag here.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ColrData {
+    /// "nclx", "nclc", "prof", or "rICC".
+    pub colour_type: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub primaries: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub primaries_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub transfer: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub transfer_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub matrix: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub matrix_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub full_range: Option<bool>,
+}
+
+/// Dolby Vision Configuration Box data (dvcC / dvvC).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DoviConfigData {
+    pub dv_version_major: u8,
+    pub dv_version_minor: u8,
+    pub dv_profile: u8,
+    pub dv_level: u8,
+    pub rpu_present: bool,
+    pub el_present: bool,
+    pub bl_present: bool,
+    /// Base-layer cross-compatibility id (`dv_bl_signal_compatibility_id`).
+    pub bl_signal_compatibility_id: u8,
+    /// Human-readable meaning of `bl_signal_compatibility_id`.
+    pub bl_signal_compatibility: String,
+}
+
+/// Mastering Display Colour Volume Box data (mdcv, SMPTE ST 2086). Chromaticity
+/// coordinates are the raw 0.00002-step integers; luminances are in cd/m².
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MdcvData {
+    pub red_x: u16,
+    pub red_y: u16,
+    pub green_x: u16,
+    pub green_y: u16,
+    pub blue_x: u16,
+    pub blue_y: u16,
+    pub white_x: u16,
+    pub white_y: u16,
+    pub max_display_mastering_luminance: f64,
+    pub min_display_mastering_luminance: f64,
+}
+
+/// Content Light Level Information Box data (clli).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ClliData {
+    /// MaxCLL: maximum content light level (cd/m²).
+    pub max_content_light_level: u16,
+    /// MaxFALL: maximum frame-average light level (cd/m²).
+    pub max_pic_average_light_level: u16,
 }

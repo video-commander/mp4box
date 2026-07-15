@@ -1379,25 +1379,19 @@ impl BoxDecoder for DvccDecoder {
         if buf.len() < 5 {
             return Ok(BoxValue::Bytes(buf));
         }
-        let dv_version_major = buf[0];
-        let dv_version_minor = buf[1];
-        let dv_profile = buf[2] >> 1;
-        let dv_level = ((buf[2] & 0x01) << 5) | (buf[3] >> 3);
-        let rpu_present = (buf[3] >> 2) & 1;
-        let el_present = (buf[3] >> 1) & 1;
-        let bl_present = buf[3] & 1;
         let compat_id = buf[4] >> 4;
-        Ok(BoxValue::Text(format!(
-            "version={}.{} profile={} level={} rpu_present={} el_present={} bl_present={} bl_compatibility={} ({})",
-            dv_version_major,
-            dv_version_minor,
-            dv_profile,
-            dv_level,
-            rpu_present,
-            el_present,
-            bl_present,
-            compat_id,
-            dv_compatibility_name(compat_id),
+        Ok(BoxValue::Structured(StructuredData::DolbyVisionConfig(
+            DoviConfigData {
+                dv_version_major: buf[0],
+                dv_version_minor: buf[1],
+                dv_profile: buf[2] >> 1,
+                dv_level: ((buf[2] & 0x01) << 5) | (buf[3] >> 3),
+                rpu_present: (buf[3] >> 2) & 1 == 1,
+                el_present: (buf[3] >> 1) & 1 == 1,
+                bl_present: buf[3] & 1 == 1,
+                bl_signal_compatibility_id: compat_id,
+                bl_signal_compatibility: dv_compatibility_name(compat_id).to_string(),
+            },
         )))
     }
 }
@@ -1579,19 +1573,31 @@ impl BoxDecoder for ColrDecoder {
             let primaries = u16::from_be_bytes(buf[4..6].try_into().unwrap());
             let transfer = u16::from_be_bytes(buf[6..8].try_into().unwrap());
             let matrix = u16::from_be_bytes(buf[8..10].try_into().unwrap());
-            let full_range = (buf[10] >> 7) & 1;
-            Ok(BoxValue::Text(format!(
-                "type=nclx primaries={} transfer={} matrix={} full_range={}",
-                cicp::labeled(primaries, cicp::primaries_name(primaries)),
-                cicp::labeled(transfer, cicp::transfer_name(transfer)),
-                cicp::labeled(matrix, cicp::matrix_name(matrix)),
-                full_range
+            let full_range = (buf[10] >> 7) & 1 == 1;
+            Ok(BoxValue::Structured(StructuredData::ColourInformation(
+                ColrData {
+                    colour_type: type_str,
+                    primaries: Some(primaries),
+                    primaries_name: cicp::primaries_name(primaries).map(str::to_string),
+                    transfer: Some(transfer),
+                    transfer_name: cicp::transfer_name(transfer).map(str::to_string),
+                    matrix: Some(matrix),
+                    matrix_name: cicp::matrix_name(matrix).map(str::to_string),
+                    full_range: Some(full_range),
+                },
             )))
         } else {
-            Ok(BoxValue::Text(format!(
-                "type={} ({} bytes)",
-                type_str,
-                buf.len().saturating_sub(4)
+            Ok(BoxValue::Structured(StructuredData::ColourInformation(
+                ColrData {
+                    colour_type: type_str,
+                    primaries: None,
+                    primaries_name: None,
+                    transfer: None,
+                    transfer_name: None,
+                    matrix: None,
+                    matrix_name: None,
+                    full_range: None,
+                },
             )))
         }
     }
@@ -1639,19 +1645,20 @@ impl BoxDecoder for MdcvDecoder {
         let wy = u16::from_be_bytes(buf[14..16].try_into().unwrap());
         let max_lum = u32::from_be_bytes(buf[16..20].try_into().unwrap());
         let min_lum = u32::from_be_bytes(buf[20..24].try_into().unwrap());
-        Ok(BoxValue::Text(format!(
-            "R({},{}) G({},{}) B({},{}) W({},{}) max_luminance={:.4} min_luminance={:.4} cd/m2",
-            rx,
-            ry,
-            gx,
-            gy,
-            bx,
-            by_,
-            wx,
-            wy,
-            max_lum as f64 / 10000.0,
-            min_lum as f64 / 10000.0
-        )))
+        Ok(BoxValue::Structured(
+            StructuredData::MasteringDisplayColourVolume(MdcvData {
+                red_x: rx,
+                red_y: ry,
+                green_x: gx,
+                green_y: gy,
+                blue_x: bx,
+                blue_y: by_,
+                white_x: wx,
+                white_y: wy,
+                max_display_mastering_luminance: max_lum as f64 / 10000.0,
+                min_display_mastering_luminance: min_lum as f64 / 10000.0,
+            }),
+        ))
     }
 }
 
@@ -1668,9 +1675,11 @@ impl BoxDecoder for ClliDecoder {
     ) -> anyhow::Result<BoxValue> {
         let max_cll = r.read_u16_be()?;
         let max_fall = r.read_u16_be()?;
-        Ok(BoxValue::Text(format!(
-            "max_cll={} max_fall={}",
-            max_cll, max_fall
+        Ok(BoxValue::Structured(StructuredData::ContentLightLevel(
+            ClliData {
+                max_content_light_level: max_cll,
+                max_pic_average_light_level: max_fall,
+            },
         )))
     }
 }
