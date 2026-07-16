@@ -16,6 +16,8 @@ jobs:
 
     env:
       CARGO_TERM_COLOR: always
+      # Pinned test fixtures land here; the real-file tests read this dir.
+      MP4_FIXTURES_DIR: ${{ github.workspace }}/target/fixtures
 
     steps:
       - name: Checkout repository
@@ -39,6 +41,13 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+
+      - name: Fetch pinned test fixtures
+        run: |
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y zstd
+          fi
+          scripts/fetch-fixtures.sh
 
       - name: cargo fmt
         run: cargo fmt --all --check

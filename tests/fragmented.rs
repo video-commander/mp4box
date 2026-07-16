@@ -297,33 +297,37 @@ fn structured_mvhd_fields() {
     assert_eq!(mvhd.decoded.as_deref(), Some("timescale=1000 duration=0"));
 }
 
-/// Real-file integration, skipped when the fixture isn't present.
+/// Real-file integration against a *pinned* mp4-fixtures release.
+///
+/// Inputs come from `$MP4_FIXTURES_DIR`, populated by `scripts/fetch-fixtures.sh`
+/// (which downloads and checksum-verifies a pinned tag). The ground-truth
+/// constants below are tied to that pin — bump them together with `FIXTURES_TAG`.
+/// Skipped when the dir isn't set, so `cargo test` still works offline.
 #[test]
 fn real_fragmented_file_ground_truth() {
-    let path = concat_home("Source/mp4-fixtures/output/fragmented_fmp4.mp4");
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("skipping: {path} not present");
+    let Some(dir) = std::env::var_os("MP4_FIXTURES_DIR") else {
+        eprintln!("skipping: MP4_FIXTURES_DIR not set (run scripts/fetch-fixtures.sh)");
+        return;
+    };
+    let path = std::path::Path::new(&dir).join("fragmented_fmp4.mp4");
+    if !path.exists() {
+        eprintln!("skipping: {} not present", path.display());
         return;
     }
 
     let tracks = mp4box::track_samples_from_path(&path).unwrap();
     assert_eq!(tracks.len(), 2);
 
-    // Ground truth from ffprobe: 300 video packets, 432 audio packets;
-    // first video packet at pos=6311, size=41665, keyframe.
+    // Ground truth from ffprobe on fixtures-v2: 300 video packets, 432 audio
+    // packets; first video packet at pos=6312, size=42224, keyframe.
     let video = tracks.iter().find(|t| t.handler_type == "vide").unwrap();
     assert_eq!(video.sample_count, 300);
-    assert_eq!(video.samples[0].file_offset, 6311);
-    assert_eq!(video.samples[0].size, 41665);
+    assert_eq!(video.samples[0].file_offset, 6312);
+    assert_eq!(video.samples[0].size, 42224);
     assert!(video.samples[0].is_sync);
     assert!(!video.samples[1].is_sync);
 
     let audio = tracks.iter().find(|t| t.handler_type == "soun").unwrap();
     assert_eq!(audio.sample_count, 432);
-    assert_eq!(audio.samples[0].file_offset, 6667518);
-}
-
-fn concat_home(rel: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    format!("{home}/{rel}")
+    assert_eq!(audio.samples[0].file_offset, 6380707);
 }

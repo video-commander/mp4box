@@ -94,6 +94,25 @@ Integration tests build **synthetic fixtures** so they're self-contained.
 Prefer that style — small hand-built boxes with asserted offsets — over binary
 fixtures.
 
+A few tests need **real media files** (e.g. `real_fragmented_file_ground_truth`
+in `tests/fragmented.rs`). These read from `$MP4_FIXTURES_DIR` and skip when it's
+unset, so plain `cargo test` still works offline. To run them, fetch a *pinned*
+release of [`video-commander/mp4-fixtures`][fx] and point the env var at it:
+
+```bash
+scripts/fetch-fixtures.sh                    # downloads + verifies the pinned tag
+export MP4_FIXTURES_DIR="$PWD/target/fixtures"
+cargo test
+```
+
+The pin lives in `scripts/fetch-fixtures.sh` (`FIXTURES_TAG`, currently
+`fixtures-v2`). **Never point these tests at a local working copy of the
+fixtures repo** — it drifts on every regeneration and the ground-truth constants
+go stale. When you bump `FIXTURES_TAG`, the fixture bytes change, so re-derive
+the asserted counts/offsets (ffprobe + the parser must agree) in the same commit.
+
+[fx]: https://github.com/video-commander/mp4-fixtures
+
 ## Downstream
 
 This crate is consumed by **video-commander** (`~/Source/video-commander`) via

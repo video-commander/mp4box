@@ -1018,7 +1018,10 @@ fn colr_nclx_hlg_transfer_named() {
     p.push(0x00);
     let boxes = parse(&plain_box(b"colr", &p));
     let decoded = find(&boxes, "colr").decoded.as_deref().unwrap();
-    assert!(decoded.contains("transfer=18 (HLG / ARIB STD-B67)"), "{decoded}");
+    assert!(
+        decoded.contains("transfer=18 (HLG / ARIB STD-B67)"),
+        "{decoded}"
+    );
 }
 
 #[test]

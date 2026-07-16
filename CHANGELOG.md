@@ -5,10 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.12.0]
 
 ### Added
 
+- **Per-field payload byte spans (`field_spans`).** Decoders can now report
+  where each payload field lives inside a box, so consumers can highlight
+  individual fields in a hex view and cross-reference them with decoded values.
+  New `FieldSpan { name, start, length }` type (payload-relative offsets) and an
+  opt-in `BoxDecoder::field_spans(version, flags, payload_len)` trait method that
+  defaults to empty, leaving existing decoders unchanged. Spans are derived from
+  box metadata **without reading the payload**, making them cheap and independent
+  of `decode()`; `Box` gains a `field_spans` field populated under `decode=true`.
+  Implemented for the fixed-layout boxes — `mvhd`, `tkhd`, `mdhd`, `hdlr`,
+  `tenc`, `tfhd`, `tfdt`, `trex`, `sidx`, `elst`, `trun`, `emsg` (v1), and the
+  sample-table headers (`stsz`/`stco`/`co64`/`stts`/`stss`/`ctts`/`stsc`) — with
+  widths and presence tracking version and flag bits. Variable-first or
+  descriptor-based layouts (`emsg` v0, `stz2`, `esds`), text-decoded boxes, and
+  the repeating bodies of sample tables and index arrays stay header-only by
+  design, since their per-entry offsets can only be known by reading the payload.
 - **Human-readable CICP colour code points.** The `colr` (nclx) and `vpcC`
   decoders now name the colour primaries, transfer characteristics, and matrix
   coefficients (ISO/IEC 23091-2) instead of printing bare integers — e.g.

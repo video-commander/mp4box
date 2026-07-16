@@ -17,7 +17,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mp4box = "0.11.0"
+mp4box = "0.12.0"
 anyhow = "1.0"  # For error handling in examples
 ```
 
@@ -31,7 +31,7 @@ features add the rest:
 For the lightest library-only build:
 
 ```toml
-mp4box = { version = "0.11.0", default-features = false, features = ["edit"] }
+mp4box = { version = "0.12.0", default-features = false, features = ["edit"] }
 ```
 
 ---
