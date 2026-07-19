@@ -1900,15 +1900,14 @@ impl BoxDecoder for TrunDecoder {
             .filter(|mask| fl & **mask != 0)
             .count();
         let remaining = buf.len().saturating_sub(cur.position() as usize);
-        let max_samples = if per_sample == 0 {
-            // Nothing in the payload constrains the count. A real fragment
-            // holds thousands of samples at most; anything past this ceiling
-            // is malformed rather than merely large.
-            const MAX_IMPLICIT_SAMPLES: usize = 1 << 20;
-            MAX_IMPLICIT_SAMPLES
-        } else {
-            remaining / per_sample
-        };
+        // With no per-sample fields nothing in the payload constrains the
+        // count, so checked_div yields None and the ceiling applies. A real
+        // fragment holds thousands of samples at most; past that the box is
+        // malformed rather than merely large.
+        const MAX_IMPLICIT_SAMPLES: usize = 1 << 20;
+        let max_samples = remaining
+            .checked_div(per_sample)
+            .unwrap_or(MAX_IMPLICIT_SAMPLES);
         if sample_count as usize > max_samples {
             anyhow::bail!(
                 "trun: sample_count {} exceeds what the box can describe (max {})",
