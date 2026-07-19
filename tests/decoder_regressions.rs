@@ -1068,7 +1068,10 @@ fn stz2_huge_sample_count_does_not_preallocate() {
     // invalid field rather than reserving gigabytes and then bailing.
     let b = find(&boxes, "stz2");
     assert!(
-        b.decoded.as_deref().unwrap_or("").contains("invalid field_size"),
+        b.decoded
+            .as_deref()
+            .unwrap_or("")
+            .contains("invalid field_size"),
         "expected a field_size error, got {:?}",
         b.decoded
     );
@@ -1175,7 +1178,10 @@ fn trun_implicit_samples_are_capped() {
         mp4box::get_boxes_tolerant(&mut cur, data.len() as u64, true).expect("tolerant parse");
     let b = find(&boxes, "trun");
     assert!(
-        b.decoded.as_deref().unwrap_or("").contains("exceeds what the box can describe"),
+        b.decoded
+            .as_deref()
+            .unwrap_or("")
+            .contains("exceeds what the box can describe"),
         "expected a bound error, got {:?}",
         b.decoded
     );
@@ -1199,7 +1205,11 @@ fn trun_implicit_samples_still_decode() {
     };
     assert_eq!(t.sample_count, 3);
     assert_eq!(t.samples.len(), 3, "implicit samples must not be dropped");
-    assert!(t.samples.iter().all(|s| s.duration.is_none() && s.size.is_none()));
+    assert!(
+        t.samples
+            .iter()
+            .all(|s| s.duration.is_none() && s.size.is_none())
+    );
 }
 
 /// A sample_count larger than the per-sample fields present can cover is
@@ -1211,13 +1221,16 @@ fn trun_sample_count_beyond_payload_is_rejected() {
     payload.extend_from_slice(&11u32.to_be_bytes()); // one sample_size
     payload.extend_from_slice(&22u32.to_be_bytes()); // another
     // flags 0x000200 = sample_size present, so each sample needs 4 bytes.
-    let data = full_box(b"trun", 0, 0x0002_00, &payload);
+    let data = full_box(b"trun", 0, 0x0000_0200, &payload);
     let mut cur = Cursor::new(&data[..]);
     let (boxes, _) =
         mp4box::get_boxes_tolerant(&mut cur, data.len() as u64, true).expect("tolerant parse");
     let b = find(&boxes, "trun");
     assert!(
-        b.decoded.as_deref().unwrap_or("").contains("exceeds what the box can describe"),
+        b.decoded
+            .as_deref()
+            .unwrap_or("")
+            .contains("exceeds what the box can describe"),
         "expected a bound error, got {:?}",
         b.decoded
     );
@@ -1230,7 +1243,7 @@ fn trun_explicit_sample_sizes_still_decode() {
     payload.extend_from_slice(&2u32.to_be_bytes()); // sample_count
     payload.extend_from_slice(&11u32.to_be_bytes());
     payload.extend_from_slice(&22u32.to_be_bytes());
-    let data = full_box(b"trun", 0, 0x0002_00, &payload);
+    let data = full_box(b"trun", 0, 0x0000_0200, &payload);
     let mut cur = Cursor::new(&data[..]);
     let (boxes, _) =
         mp4box::get_boxes_tolerant(&mut cur, data.len() as u64, true).expect("tolerant parse");
@@ -1239,7 +1252,10 @@ fn trun_explicit_sample_sizes_still_decode() {
         panic!("expected TrackFragmentRun, got {:?}", b.decoded);
     };
     assert_eq!(
-        t.samples.iter().map(|s| s.size.unwrap()).collect::<Vec<_>>(),
+        t.samples
+            .iter()
+            .map(|s| s.size.unwrap())
+            .collect::<Vec<_>>(),
         vec![11, 22]
     );
 }

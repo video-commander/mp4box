@@ -320,7 +320,9 @@ fn meta_is_quicktime_style<R: Read + Seek>(
     let size = r.read_u32_be()? as u64;
     let mut typ = [0u8; 4];
     r.read_exact(&mut typ)?;
-    Ok(size >= 8 && content_start.saturating_add(size) <= box_end && fourcc_is_printable(&FourCC(typ)))
+    Ok(size >= 8
+        && content_start.saturating_add(size) <= box_end
+        && fourcc_is_printable(&FourCC(typ)))
 }
 
 fn fourcc_is_printable(cc: &FourCC) -> bool {

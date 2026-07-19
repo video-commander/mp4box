@@ -219,7 +219,9 @@ fn largesize_near_u64_max_does_not_overflow() {
     assert_eq!(boxes[1].typ, "mdat");
     // The overrun is reported rather than silently wrapping to a small value.
     assert!(
-        issues.iter().any(|i| i.message.contains("overruns its container")),
+        issues
+            .iter()
+            .any(|i| i.message.contains("overruns its container")),
         "expected an overrun issue, got {issues:?}"
     );
 }

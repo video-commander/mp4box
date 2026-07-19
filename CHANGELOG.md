@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1]
+
+### Fixed
+
+Hardening pass against malformed input, found by fuzzing the box tree with
+`cargo-fuzz`. Every fix bounds a value the file controls; none change how
+well-formed files decode.
+
+- **`stz2` reserved capacity from `sample_count` before validating
+  `field_size`.** A 21-byte box declaring ~1.7 billion samples requested a
+  single ~6.9 GB allocation, and an invalid `field_size` still paid for it
+  before bailing. The count is now clamped to what the remaining payload can
+  describe, and `field_size` is validated first.
+- **`trun` grew its sample vector without bound.** With none of the
+  per-sample flags set, the decode loop reads nothing per iteration, so
+  `sample_count` alone drove growth past 2 GB with no end-of-input to stop it.
+  The count is now bounded by the payload, with a ceiling for the flagless
+  case. Those entries stay materialized — they carry meaning via the
+  `tfhd`/`trex` defaults — so sample enumeration on fragmented files is
+  unchanged.
+- **`irot` reported the wrong angle for 270° rotation.** `(byte & 0x03) * 90`
+  was computed in `u8`, and `3 * 90 = 270` overflows it: a panic in debug
+  builds and a wrap to `angle=14°` in release. This affected well-formed
+  files, not just malformed ones.
+- **Box offset arithmetic overflowed on 64-bit `largesize` boxes.** A box
+  declaring a size near `u64::MAX` overflowed `h.start + h.size` in the
+  container-overrun check. In release this wrapped, so the overrun went
+  unreported and the box was not clamped to its parent. Every offset
+  computation in `parser.rs` and `api.rs` now saturates (15 sites), and
+  `extract_ilst_data_value` additionally clamps a box end to its enclosing
+  range before using it to size a buffer.
+
 ## [0.12.0]
 
 ### Added
