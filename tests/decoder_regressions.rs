@@ -1048,3 +1048,198 @@ fn dvcc_decodes_profile_and_compatibility() {
     assert_eq!(d.bl_signal_compatibility_id, 1);
     assert_eq!(d.bl_signal_compatibility, "HDR10 (BT.2020 PQ)");
 }
+
+// ---------- stz2 unbounded allocation (found by fuzzing, 2026-07-19) ----------
+
+/// The exact 21-byte input libFuzzer produced. The declared box size is ~2 GB
+/// and sample_count is ~1.7 billion, while the payload holds nothing; the
+/// decoder used to reserve ~6.9 GB from sample_count before discovering that.
+#[test]
+fn stz2_huge_sample_count_does_not_preallocate() {
+    let input: &[u8] = &[
+        0x7c, 0x74, 0x4f, 0x64, 0x73, 0x74, 0x7a, 0x32, 0x66, 0x70, 0x20, 0x20, 0x20, 0x20, 0x60,
+        0x4c, 0x66, 0x64, 0x20, 0x20, 0x20,
+    ];
+    let mut cur = Cursor::new(input);
+    let (boxes, _issues) =
+        mp4box::get_boxes_tolerant(&mut cur, input.len() as u64, true).expect("tolerant parse");
+
+    // field_size is now validated before any allocation, so this reports the
+    // invalid field rather than reserving gigabytes and then bailing.
+    let b = find(&boxes, "stz2");
+    assert!(
+        b.decoded.as_deref().unwrap_or("").contains("invalid field_size"),
+        "expected a field_size error, got {:?}",
+        b.decoded
+    );
+    assert!(b.structured_data.is_none());
+}
+
+/// Same class, minimised: a well-formed stz2 header with a valid field_size and
+/// a sample_count far beyond what the payload can hold.
+#[test]
+fn stz2_sample_count_beyond_payload_is_bounded() {
+    // field_size = 8, sample_count = 0xFFFF_FFFF, but only 2 sample bytes.
+    let payload = [0, 0, 0, 8, 0xFF, 0xFF, 0xFF, 0xFF, 0x11, 0x22];
+    let data = full_box(b"stz2", 0, 0, &payload);
+    let mut cur = Cursor::new(&data[..]);
+    let (boxes, _) =
+        mp4box::get_boxes_tolerant(&mut cur, data.len() as u64, true).expect("tolerant parse");
+    // With a valid field_size the count is clamped to what the payload could
+    // describe, so the read loop reaches EOF and reports a normal decode error
+    // instead of reserving 4 billion entries first.
+    let b = find(&boxes, "stz2");
+    assert!(
+        b.decoded.as_deref().unwrap_or("").contains("decode error"),
+        "expected a decode error, got {:?}",
+        b.decoded
+    );
+    assert!(b.structured_data.is_none());
+}
+
+/// The clamp must not truncate a legitimate stz2: an honest sample_count that
+/// the payload really does cover still decodes in full.
+#[test]
+fn stz2_valid_sample_count_still_decodes() {
+    // field_size = 8, sample_count = 3, with exactly 3 sample bytes.
+    let payload = [0, 0, 0, 8, 0, 0, 0, 3, 0x11, 0x22, 0x33];
+    let data = full_box(b"stz2", 0, 0, &payload);
+    let mut cur = Cursor::new(&data[..]);
+    let (boxes, _) =
+        mp4box::get_boxes_tolerant(&mut cur, data.len() as u64, true).expect("tolerant parse");
+    let b = find(&boxes, "stz2");
+    let Some(StructuredData::SampleSize(d)) = &b.structured_data else {
+        panic!("expected SampleSize, got {:?}", b.decoded);
+    };
+    assert_eq!(d.sample_count, 3);
+    assert_eq!(d.sample_sizes, vec![0x11, 0x22, 0x33]);
+}
+
+/// 4-bit fields pack two samples per byte, so the clamp has to account for that
+/// or it would truncate a valid box.
+#[test]
+fn stz2_four_bit_fields_still_decode() {
+    // field_size = 4, sample_count = 4, packed into 2 bytes.
+    let payload = [0, 0, 0, 4, 0, 0, 0, 4, 0x12, 0x34];
+    let data = full_box(b"stz2", 0, 0, &payload);
+    let mut cur = Cursor::new(&data[..]);
+    let (boxes, _) =
+        mp4box::get_boxes_tolerant(&mut cur, data.len() as u64, true).expect("tolerant parse");
+    let b = find(&boxes, "stz2");
+    let Some(StructuredData::SampleSize(d)) = &b.structured_data else {
+        panic!("expected SampleSize, got {:?}", b.decoded);
+    };
+    assert_eq!(d.sample_sizes, vec![1, 2, 3, 4]);
+}
+
+// ---------- irot overflow (found by fuzzing, 2026-07-19) ----------
+
+/// `(byte & 0x03) * 90` was computed in u8, so the valid 270° case overflowed:
+/// a panic under debug assertions and a wrap to 14° in release. All four
+/// angles are legal values, so this was a correctness bug on well-formed
+/// images, not only on malformed input.
+#[test]
+fn irot_reports_all_four_angles() {
+    for (raw, expected) in [(0u8, 0), (1, 90), (2, 180), (3, 270)] {
+        let boxes = parse(&plain_box(b"irot", &[raw]));
+        let irot = find(&boxes, "irot");
+        assert_eq!(
+            irot.decoded.as_deref().unwrap(),
+            format!("angle={expected}°"),
+            "raw irot byte {raw}"
+        );
+    }
+}
+
+/// The upper 6 bits are reserved and must be ignored rather than folded into
+/// the angle.
+#[test]
+fn irot_ignores_reserved_bits() {
+    let boxes = parse(&plain_box(b"irot", &[0xFF]));
+    let irot = find(&boxes, "irot");
+    assert_eq!(irot.decoded.as_deref().unwrap(), "angle=270°");
+}
+
+// ---------- trun unbounded growth (found by fuzzing, 2026-07-19) ----------
+
+/// With no per-sample flags set, the decode loop reads zero bytes per
+/// iteration, so sample_count alone drove Vec growth past 2 GB with no EOF to
+/// stop it. It is now rejected as exceeding what the box can describe.
+#[test]
+fn trun_implicit_samples_are_capped() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // sample_count
+    let data = full_box(b"trun", 0, 0, &payload); // flags = 0: no per-sample fields
+    let mut cur = Cursor::new(&data[..]);
+    let (boxes, _) =
+        mp4box::get_boxes_tolerant(&mut cur, data.len() as u64, true).expect("tolerant parse");
+    let b = find(&boxes, "trun");
+    assert!(
+        b.decoded.as_deref().unwrap_or("").contains("exceeds what the box can describe"),
+        "expected a bound error, got {:?}",
+        b.decoded
+    );
+    assert!(b.structured_data.is_none());
+}
+
+/// The legitimate CMAF shape must keep working: a trun carrying only a
+/// sample_count, with every per-sample value coming from tfhd/trex defaults.
+/// Those entries are meaningful, so they must still be materialised.
+#[test]
+fn trun_implicit_samples_still_decode() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&3u32.to_be_bytes()); // sample_count, no flags
+    let data = full_box(b"trun", 0, 0, &payload);
+    let mut cur = Cursor::new(&data[..]);
+    let (boxes, _) =
+        mp4box::get_boxes_tolerant(&mut cur, data.len() as u64, true).expect("tolerant parse");
+    let b = find(&boxes, "trun");
+    let Some(StructuredData::TrackFragmentRun(t)) = &b.structured_data else {
+        panic!("expected TrackFragmentRun, got {:?}", b.decoded);
+    };
+    assert_eq!(t.sample_count, 3);
+    assert_eq!(t.samples.len(), 3, "implicit samples must not be dropped");
+    assert!(t.samples.iter().all(|s| s.duration.is_none() && s.size.is_none()));
+}
+
+/// A sample_count larger than the per-sample fields present can cover is
+/// rejected up front rather than after allocating for it.
+#[test]
+fn trun_sample_count_beyond_payload_is_rejected() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&1000u32.to_be_bytes()); // sample_count
+    payload.extend_from_slice(&11u32.to_be_bytes()); // one sample_size
+    payload.extend_from_slice(&22u32.to_be_bytes()); // another
+    // flags 0x000200 = sample_size present, so each sample needs 4 bytes.
+    let data = full_box(b"trun", 0, 0x0002_00, &payload);
+    let mut cur = Cursor::new(&data[..]);
+    let (boxes, _) =
+        mp4box::get_boxes_tolerant(&mut cur, data.len() as u64, true).expect("tolerant parse");
+    let b = find(&boxes, "trun");
+    assert!(
+        b.decoded.as_deref().unwrap_or("").contains("exceeds what the box can describe"),
+        "expected a bound error, got {:?}",
+        b.decoded
+    );
+}
+
+/// And an honest count with matching payload still decodes in full.
+#[test]
+fn trun_explicit_sample_sizes_still_decode() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&2u32.to_be_bytes()); // sample_count
+    payload.extend_from_slice(&11u32.to_be_bytes());
+    payload.extend_from_slice(&22u32.to_be_bytes());
+    let data = full_box(b"trun", 0, 0x0002_00, &payload);
+    let mut cur = Cursor::new(&data[..]);
+    let (boxes, _) =
+        mp4box::get_boxes_tolerant(&mut cur, data.len() as u64, true).expect("tolerant parse");
+    let b = find(&boxes, "trun");
+    let Some(StructuredData::TrackFragmentRun(t)) = &b.structured_data else {
+        panic!("expected TrackFragmentRun, got {:?}", b.decoded);
+    };
+    assert_eq!(
+        t.samples.iter().map(|s| s.size.unwrap()).collect::<Vec<_>>(),
+        vec![11, 22]
+    );
+}

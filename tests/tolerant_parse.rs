@@ -196,3 +196,46 @@ fn real_files_parse_without_issues() {
         assert!(issues.is_empty(), "{path}: unexpected issues {issues:?}");
     }
 }
+
+// ---------- 64-bit size overflow (found by fuzzing, 2026-07-19) ----------
+
+/// A largesize box declaring u64::MAX overflowed `h.start + h.size` in the
+/// container-overrun check. That panicked under debug assertions and wrapped
+/// in release, so the overrun went unreported and the box was not clamped.
+#[test]
+fn largesize_near_u64_max_does_not_overflow() {
+    // An 8-byte box first, so the largesize box starts at a non-zero offset
+    // and the addition actually overflows.
+    let mut data = plain_box(b"free", &[]);
+    data.extend_from_slice(&1u32.to_be_bytes()); // size = 1 -> 64-bit largesize
+    data.extend_from_slice(b"mdat");
+    data.extend_from_slice(&u64::MAX.to_be_bytes());
+
+    let len = data.len() as u64;
+    let mut cur = Cursor::new(&data[..]);
+    let (boxes, issues) = get_boxes_tolerant(&mut cur, len, true).expect("tolerant parse");
+
+    assert_eq!(boxes.len(), 2);
+    assert_eq!(boxes[1].typ, "mdat");
+    // The overrun is reported rather than silently wrapping to a small value.
+    assert!(
+        issues.iter().any(|i| i.message.contains("overruns its container")),
+        "expected an overrun issue, got {issues:?}"
+    );
+}
+
+/// The same shape nested inside a container: damage stays contained and the
+/// clamp keeps the child inside its parent.
+#[test]
+fn nested_largesize_overflow_is_clamped() {
+    let mut inner = Vec::new();
+    inner.extend_from_slice(&1u32.to_be_bytes());
+    inner.extend_from_slice(b"stbl");
+    inner.extend_from_slice(&u64::MAX.to_be_bytes());
+    let data = plain_box(b"moov", &inner);
+
+    let len = data.len() as u64;
+    let mut cur = Cursor::new(&data[..]);
+    let (boxes, _issues) = get_boxes_tolerant(&mut cur, len, true).expect("tolerant parse");
+    assert_eq!(boxes[0].typ, "moov");
+}

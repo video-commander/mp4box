@@ -503,7 +503,14 @@ fn find_box_in_range<R: Read + Seek>(
     r.seek(SeekFrom::Start(start))?;
     while r.stream_position()? + 8 <= end {
         let h = read_box_header(r)?;
-        let box_end = if h.size == 0 { end } else { h.start + h.size };
+        // Clamp to the enclosing range: h.size comes from the file, so an
+        // oversized box would otherwise push box_end past the end of the data
+        // (and could overflow the add). Downstream this value sizes a buffer.
+        let box_end = if h.size == 0 {
+            end
+        } else {
+            h.start.saturating_add(h.size).min(end)
+        };
         if &h.typ.0 == target {
             return Ok(Some(h));
         }
@@ -521,7 +528,14 @@ fn extract_ilst_data_value<R: Read + Seek>(
     r.seek(SeekFrom::Start(start))?;
     while r.stream_position()? + 8 <= end {
         let h = read_box_header(r)?;
-        let box_end = if h.size == 0 { end } else { h.start + h.size };
+        // Clamp to the enclosing range: h.size comes from the file, so an
+        // oversized box would otherwise push box_end past the end of the data
+        // (and could overflow the add). Downstream this value sizes a buffer.
+        let box_end = if h.size == 0 {
+            end
+        } else {
+            h.start.saturating_add(h.size).min(end)
+        };
 
         if &h.typ.0 == b"data" {
             // FullBox header: version (1 byte) + flags (3 bytes) = type indicator

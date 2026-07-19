@@ -162,7 +162,7 @@ fn parse_children_impl<R: Read + Seek>(
                     message: format!(
                         "unreadable box header ({}); skipping remaining {} bytes of container",
                         e,
-                        parent_end - header_start
+                        parent_end.saturating_sub(header_start)
                     ),
                 });
                 break;
@@ -171,7 +171,7 @@ fn parse_children_impl<R: Read + Seek>(
 
         if let Some(issues) = issues
             && h.size != 0
-            && h.start + h.size > parent_end
+            && h.start.saturating_add(h.size) > parent_end
         {
             issues.push(ParseIssue {
                 offset: h.start,
@@ -179,7 +179,7 @@ fn parse_children_impl<R: Read + Seek>(
                     "box '{}' declares size {} which overruns its container by {} bytes; clamped",
                     h.typ,
                     h.size,
-                    h.start + h.size - parent_end
+                    h.start.saturating_add(h.size).saturating_sub(parent_end)
                 ),
             });
         }
@@ -197,7 +197,7 @@ fn parse_children_impl<R: Read + Seek>(
                     offset: h.start,
                     message: format!("failed to parse contents of '{}': {}", h.typ, e),
                 });
-                let data_offset = h.start + h.header_size;
+                let data_offset = h.start.saturating_add(h.header_size);
                 NodeKind::Leaf {
                     data_offset,
                     data_len: box_end.saturating_sub(data_offset),
@@ -219,7 +219,7 @@ fn box_end(h: &BoxHeader, parent_end: u64) -> u64 {
     if h.size == 0 {
         parent_end
     } else {
-        (h.start + h.size).min(parent_end)
+        h.start.saturating_add(h.size).min(parent_end)
     }
 }
 
@@ -240,7 +240,7 @@ fn classify_box<R: Read + Seek>(
     issues: &mut Option<&mut Vec<ParseIssue>>,
 ) -> Result<NodeKind> {
     let kb = KnownBox::from(h.typ);
-    let content_start = h.start + h.header_size;
+    let content_start = h.start.saturating_add(h.header_size);
 
     if kb == KnownBox::Stsd {
         return parse_stsd(r, h, box_end, issues);
@@ -313,14 +313,14 @@ fn meta_is_quicktime_style<R: Read + Seek>(
     content_start: u64,
     box_end: u64,
 ) -> Result<bool> {
-    if content_start + 8 > box_end {
+    if content_start.saturating_add(8) > box_end {
         return Ok(false);
     }
     r.seek(SeekFrom::Start(content_start))?;
     let size = r.read_u32_be()? as u64;
     let mut typ = [0u8; 4];
     r.read_exact(&mut typ)?;
-    Ok(size >= 8 && content_start + size <= box_end && fourcc_is_printable(&FourCC(typ)))
+    Ok(size >= 8 && content_start.saturating_add(size) <= box_end && fourcc_is_printable(&FourCC(typ)))
 }
 
 fn fourcc_is_printable(cc: &FourCC) -> bool {
@@ -339,7 +339,7 @@ fn parse_stsd<R: Read + Seek>(
     box_end: u64,
     issues: &mut Option<&mut Vec<ParseIssue>>,
 ) -> Result<NodeKind> {
-    let content_start = h.start + h.header_size;
+    let content_start = h.start.saturating_add(h.header_size);
     r.seek(SeekFrom::Start(content_start))?;
     let (version, flags) = read_version_flags(r)?;
     let data_offset = r.stream_position()?;
@@ -423,10 +423,10 @@ fn sample_entry_fixed_len<R: Read + Seek>(
         | KnownBox::Fpcm => {
             // The first 2 bytes of the reserved area hold the QuickTime
             // sound sample description version (0 in plain ISO files).
-            if content_start + 10 > entry_end {
+            if content_start.saturating_add(10) > entry_end {
                 return Ok(None);
             }
-            r.seek(SeekFrom::Start(content_start + 8))?;
+            r.seek(SeekFrom::Start(content_start.saturating_add(8)))?;
             let qt_version = r.read_u16_be()?;
             Ok(Some(match qt_version {
                 1 => AUDIO_V1,
@@ -445,7 +445,7 @@ fn parse_sample_entry<R: Read + Seek>(
     h: &BoxHeader,
     entry_end: u64,
 ) -> Result<NodeKind> {
-    let content_start = h.start + h.header_size;
+    let content_start = h.start.saturating_add(h.header_size);
     let leaf = NodeKind::Leaf {
         data_offset: content_start,
         data_len: entry_end.saturating_sub(content_start),
@@ -455,7 +455,7 @@ fn parse_sample_entry<R: Read + Seek>(
         return Ok(leaf);
     };
 
-    let child_start = content_start + fixed;
+    let child_start = content_start.saturating_add(fixed);
     if child_start + 8 > entry_end {
         return Ok(leaf);
     }

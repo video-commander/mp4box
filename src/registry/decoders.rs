@@ -851,7 +851,22 @@ impl BoxDecoder for Stz2Decoder {
         let field_size = cur.read_u8()?;
         let sample_count = cur.read_u32_be()?;
 
-        let mut sample_sizes = Vec::with_capacity(sample_count as usize);
+        // sample_count is a 4-byte field read straight from the file and is
+        // independent of how many bytes the box actually holds, so it can only
+        // be trusted as an upper bound. Reserve what the remaining payload
+        // could really describe: a 21-byte stz2 declaring ~1.7 billion samples
+        // otherwise reserved ~6.9 GB here, before the loops below discovered
+        // there was nothing to read. Validating field_size first matters for
+        // the same reason — an invalid one used to cost the allocation before
+        // bailing.
+        let remaining_bytes = buf.len().saturating_sub(cur.position() as usize);
+        let max_samples = match field_size {
+            4 => remaining_bytes.saturating_mul(2),
+            8 => remaining_bytes,
+            16 => remaining_bytes / 2,
+            other => anyhow::bail!("stz2: invalid field_size {}", other),
+        };
+        let mut sample_sizes = Vec::with_capacity((sample_count as usize).min(max_samples));
         match field_size {
             4 => {
                 let mut remaining = sample_count;
@@ -1724,7 +1739,11 @@ impl BoxDecoder for IrotDecoder {
         _flags: Option<u32>,
     ) -> anyhow::Result<BoxValue> {
         let byte = r.read_u8()?;
-        let degrees = (byte & 0x03) * 90;
+        // Widen before multiplying: the field holds 0..=3 and 3 * 90 = 270,
+        // which overflows u8. That panicked under debug assertions and wrapped
+        // to 14 in release, so a legitimately 270°-rotated image reported
+        // "angle=14°".
+        let degrees = (byte & 0x03) as u16 * 90;
         Ok(BoxValue::Text(format!("angle={}°", degrees)))
     }
 }
@@ -1852,40 +1871,74 @@ impl BoxDecoder for TrunDecoder {
         let ver = version.unwrap_or(0);
         let fl = flags.unwrap_or(0);
 
-        let sample_count = r.read_u32_be()?;
+        // Buffer the payload so sample_count can be bounded by the bytes that
+        // actually exist. read_to_end grows as it reads, so an oversized
+        // declared box size costs nothing here.
+        let buf = read_all(r)?;
+        let mut cur = Cursor::new(&buf);
+
+        let sample_count = cur.read_u32_be()?;
         let data_offset = if fl & 0x000001 != 0 {
-            Some(r.read_i32_be()?)
+            Some(cur.read_i32_be()?)
         } else {
             None
         };
         let first_sample_flags = if fl & 0x000004 != 0 {
-            Some(r.read_u32_be()?)
+            Some(cur.read_u32_be()?)
         } else {
             None
         };
 
-        let mut samples = Vec::new();
+        // Each sample consumes 4 bytes per per-sample field its flags select.
+        // When none are set the loop below reads nothing per iteration, so
+        // there is no EOF to stop it and sample_count alone drove the Vec past
+        // 2 GB. Those entries are still meaningful — samples.rs falls back to
+        // the tfhd/trex defaults for them — so they cannot simply be dropped;
+        // they just need a ceiling.
+        let per_sample = 4 * [0x0000_0100u32, 0x0000_0200, 0x0000_0400, 0x0000_0800]
+            .iter()
+            .filter(|mask| fl & **mask != 0)
+            .count();
+        let remaining = buf.len().saturating_sub(cur.position() as usize);
+        let max_samples = if per_sample == 0 {
+            // Nothing in the payload constrains the count. A real fragment
+            // holds thousands of samples at most; anything past this ceiling
+            // is malformed rather than merely large.
+            const MAX_IMPLICIT_SAMPLES: usize = 1 << 20;
+            MAX_IMPLICIT_SAMPLES
+        } else {
+            remaining / per_sample
+        };
+        if sample_count as usize > max_samples {
+            anyhow::bail!(
+                "trun: sample_count {} exceeds what the box can describe (max {})",
+                sample_count,
+                max_samples
+            );
+        }
+
+        let mut samples = Vec::with_capacity(sample_count as usize);
         for _ in 0..sample_count {
             let duration = if fl & 0x000100 != 0 {
-                Some(r.read_u32_be()?)
+                Some(cur.read_u32_be()?)
             } else {
                 None
             };
             let size = if fl & 0x000200 != 0 {
-                Some(r.read_u32_be()?)
+                Some(cur.read_u32_be()?)
             } else {
                 None
             };
             let sflags = if fl & 0x000400 != 0 {
-                Some(r.read_u32_be()?)
+                Some(cur.read_u32_be()?)
             } else {
                 None
             };
             let cto = if fl & 0x000800 != 0 {
                 if ver == 1 {
-                    Some(r.read_i32_be()?)
+                    Some(cur.read_i32_be()?)
                 } else {
-                    Some(r.read_u32_be()? as i32)
+                    Some(cur.read_u32_be()? as i32)
                 }
             } else {
                 None
