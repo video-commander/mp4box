@@ -452,19 +452,26 @@ impl StructuredData {
                 s
             }
             StructuredData::ColourInformation(d) => {
-                if d.colour_type == "nclx" {
+                if matches!(d.colour_type.as_str(), "nclx" | "nclc") {
                     let lab = |v: Option<u16>, n: &Option<String>| match (v, n) {
                         (Some(v), Some(n)) => format!("{v} ({n})"),
                         (Some(v), None) => v.to_string(),
                         _ => "?".to_string(),
                     };
-                    format!(
-                        "type=nclx primaries={} transfer={} matrix={} full_range={}",
+                    let mut text = format!(
+                        "type={} primaries={} transfer={} matrix={}",
+                        d.colour_type,
                         lab(d.primaries, &d.primaries_name),
                         lab(d.transfer, &d.transfer_name),
-                        lab(d.matrix, &d.matrix_name),
-                        d.full_range.map(u8::from).unwrap_or(0)
-                    )
+                        lab(d.matrix, &d.matrix_name)
+                    );
+                    if d.colour_type == "nclx" {
+                        text.push_str(&format!(
+                            " full_range={}",
+                            d.full_range.map(u8::from).unwrap_or(0)
+                        ));
+                    }
+                    text
                 } else {
                     format!("type={}", d.colour_type)
                 }
@@ -760,10 +767,11 @@ pub struct TrunSample {
 
 /// Colour Information Box data (colr).
 ///
-/// For `nclx` the CICP code points are captured with their human-readable
-/// names (see [`crate::registry::cicp`]); `transfer` in particular signals HDR
-/// (16 = PQ, 18 = HLG). Other colour types (`nclc`, `prof`, `rICC`) carry only
-/// the `colour_type` tag here.
+/// For `nclx` and QuickTime `nclc` the CICP code points are captured with their
+/// human-readable names (see [`crate::registry::cicp`]); `transfer` signals HDR
+/// (16 = PQ, 18 = HLG). Only `nclx` carries a range flag; `nclc` leaves
+/// `full_range` absent. Other colour types (`prof`, `rICC`) carry only the
+/// `colour_type` tag here.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ColrData {
     /// "nclx", "nclc", "prof", or "rICC".

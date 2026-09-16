@@ -449,6 +449,12 @@ fn sample_entry_fixed_len<R: Read + Seek>(
         | KnownBox::Dvh1
         | KnownBox::Dvhe
         | KnownBox::Dav1
+        | KnownBox::Apch
+        | KnownBox::Apcn
+        | KnownBox::Apcs
+        | KnownBox::Apco
+        | KnownBox::Ap4h
+        | KnownBox::Ap4x
         | KnownBox::Encv => Ok(Some(VISUAL)),
         KnownBox::Mp4a
         | KnownBox::Ac3

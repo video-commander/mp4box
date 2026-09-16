@@ -260,7 +260,8 @@ fn parse_trak(trak: &Box, index: usize, info: &mut MediaInfo) {
             // If no type from hdlr, infer from codec
             if ti.track_type.is_none() {
                 let tt = match c.as_str() {
-                    "avc1" | "hvc1" | "hev1" | "vp09" | "av01" => "video",
+                    "avc1" | "hvc1" | "hev1" | "vp09" | "av01" | "apch" | "apcn" | "apcs"
+                    | "apco" | "ap4h" | "ap4x" => "video",
                     "mp4a" | "ac-3" | "ec-3" | "Opus" => "audio",
                     _ => "other",
                 };

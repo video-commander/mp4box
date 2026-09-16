@@ -481,6 +481,12 @@ fn is_visual_sample_entry(codec: &[u8; 4]) -> bool {
             | b"dvh1"
             | b"dvhe"
             | b"dav1"
+            | b"apch"
+            | b"apcn"
+            | b"apcs"
+            | b"apco"
+            | b"ap4h"
+            | b"ap4x"
             | b"encv"
     )
 }
@@ -555,7 +561,12 @@ impl BoxDecoder for StsdDecoder {
                 sample_rate: None,
             };
 
-            if is_visual_sample_entry(&codec_bytes) {
+            // Dimensions end at byte 36 of the entry, including its header.
+            // A short entry must not borrow those fields from its sibling.
+            if is_visual_sample_entry(&codec_bytes)
+                && entry_size >= 36
+                && entry_start.saturating_add(36) <= buf.len() as u64
+            {
                 // pre_defined (2) + reserved (2) + pre_defined (12), then
                 // width and height
                 let mut skip = [0u8; 16];
@@ -1584,11 +1595,18 @@ impl BoxDecoder for ColrDecoder {
         }
         let colour_type = &buf[0..4];
         let type_str = String::from_utf8_lossy(colour_type).to_string();
-        if colour_type == b"nclx" && buf.len() >= 11 {
-            let primaries = u16::from_be_bytes(buf[4..6].try_into().unwrap());
-            let transfer = u16::from_be_bytes(buf[6..8].try_into().unwrap());
-            let matrix = u16::from_be_bytes(buf[8..10].try_into().unwrap());
-            let full_range = (buf[10] >> 7) & 1 == 1;
+        if (colour_type == b"nclx" && buf.len() >= 11)
+            || (colour_type == b"nclc" && buf.len() >= 10)
+        {
+            let primaries = u16::from_be_bytes([buf[4], buf[5]]);
+            let transfer = u16::from_be_bytes([buf[6], buf[7]]);
+            let matrix = u16::from_be_bytes([buf[8], buf[9]]);
+            // QuickTime nclc has no range flag, even if trailing bytes exist.
+            let full_range = if colour_type == b"nclx" {
+                Some((buf[10] >> 7) & 1 == 1)
+            } else {
+                None
+            };
             Ok(BoxValue::Structured(StructuredData::ColourInformation(
                 ColrData {
                     colour_type: type_str,
@@ -1598,7 +1616,7 @@ impl BoxDecoder for ColrDecoder {
                     transfer_name: cicp::transfer_name(transfer).map(str::to_string),
                     matrix: Some(matrix),
                     matrix_name: cicp::matrix_name(matrix).map(str::to_string),
-                    full_range: Some(full_range),
+                    full_range,
                 },
             )))
         } else {

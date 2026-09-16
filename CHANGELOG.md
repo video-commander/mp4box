@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **ProRes visual sample entries.** `apch`, `apcn`, `apcs`, `apco`, `ap4h`, and
+  `ap4x` expose their child boxes and decoded dimensions; `mp4info` recognizes
+  them as video when the handler type is absent.
+- **QuickTime `nclc` color tags.** `colr` decoding exposes primaries, transfer,
+  and matrix codes with their CICP names. `full_range` remains absent because
+  `nclc` has no range flag.
+
+### Changed
+
+- `KnownBox` adds six ProRes sample-entry variants. Exhaustive downstream
+  matches must handle these variants.
+
+### Fixed
+
+- Short visual sample entries no longer read dimensions from the following
+  entry in `stsd`.
+
 ## [0.13.0]
 
 ### Fixed

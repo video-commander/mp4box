@@ -72,10 +72,13 @@ fn main() -> anyhow::Result<()> {
   - Leaf, FullBox (version/flags), Container, FullBox containers (`meta`, `stsd`), UUID
   - Large-size (64-bit) boxes; recursion into `stsd` sample entries and their
     codec configuration children (`avcC`, `hvcC`, `esds`, `dOps`, ...)
+  - All six ProRes sample-entry types expose their child boxes and dimensions
 - **Known-box registry** — hundreds of ISO/HEIF/MPEG boxes with full names
 - **Typed structured decoding** — `mvhd`, `tkhd`, `mdhd`, `stsd`, the whole
   sample table family, `elst`, `sidx`, `iods`, and the fragment boxes
   (`tfhd`/`tfdt`/`trun`/`trex`) decode to serializable structs
+  - `colr` exposes CICP color tags from `nclx` and QuickTime `nclc`; only
+    `nclx` declares full/limited range
 - **Sample tables** — per-sample DTS/PTS, duration, size, file offset, and
   keyframe flags for progressive *and* fragmented (fMP4/DASH/CMAF) files
 - **iTunes metadata** — read tags with `get_itunes_tags`, write them with the
