@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- PlayReady UTF-16 decoding uses fixed-size slice chunks, satisfying Rust 1.98
+  Clippy without changing decoded output.
 - Short visual sample entries no longer read dimensions from the following
   entry in `stsd`.
 

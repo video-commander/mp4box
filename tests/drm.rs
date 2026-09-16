@@ -232,6 +232,24 @@ fn playready_v42_kids_attribute_form_decodes() {
 }
 
 #[test]
+fn playready_utf16_preserves_unicode_and_strips_bom() {
+    let xml = "<WRMHEADER><DATA>日本語 🎬</DATA></WRMHEADER>";
+    let pro = playready_object(&format!("\u{feff}{xml}"));
+    let pr = parse_playready_pssh_data(&pro).expect("playready parse");
+    assert_eq!(pr.xml.as_deref(), Some(xml));
+}
+
+#[test]
+fn playready_rejects_odd_length_utf16_record() {
+    let mut pro = playready_object("<WRMHEADER></WRMHEADER>");
+    pro.pop();
+    let total = pro.len() as u32;
+    pro[..4].copy_from_slice(&total.to_le_bytes());
+    pro[8..10].copy_from_slice(&((total - 10) as u16).to_le_bytes());
+    assert!(parse_playready_pssh_data(&pro).is_none());
+}
+
+#[test]
 fn playready_rejects_garbage() {
     assert!(parse_playready_pssh_data(&[]).is_none());
     assert!(parse_playready_pssh_data(&[0xFF; 32]).is_none());
